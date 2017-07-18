@@ -94,46 +94,58 @@ int main(int argc, char* argv[]) {
     // respect to the centroidal reference frame (which is the body reference
     // frame for a ChBody).
     auto cyl_1 = std::make_shared<ChCylinderShape>();
-    cyl_1->GetCylinderGeometry().p1 = ChVector<>(-1, 0, 0);
-    cyl_1->GetCylinderGeometry().p2 = ChVector<>(1, 0, 0);
-    cyl_1->GetCylinderGeometry().rad = 0.2;
+    cyl_1->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+    cyl_1->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
+    cyl_1->GetCylinderGeometry().rad = 0.1;
     pend_1->AddAsset(cyl_1);
-
-    auto joint_cyl = std::make_shared<ChCylinderShape>();
-    joint_cyl->GetCylinderGeometry().p1 = ChVector<>(1, 0, -.2);
-    joint_cyl->GetCylinderGeometry().p2 = ChVector<>(1, 0, .2);
-    joint_cyl->GetCylinderGeometry().rad = 0.2;
-    pend_1->AddAsset(joint_cyl);
 
     auto col_1 = std::make_shared<ChColorAsset>();
     col_1->SetColor(ChColor(0.6f, 0, 0));
     pend_1->AddAsset(col_1);
+
+    auto joint_cyl = std::make_shared<ChCylinderShape>();
+    joint_cyl->GetCylinderGeometry().p1 = ChVector<>(0, 0, -.2);
+    joint_cyl->GetCylinderGeometry().p2 = ChVector<>(0, 0, .2);
+    joint_cyl->GetCylinderGeometry().rad = 0.2;
+    pend_1->AddAsset(joint_cyl);
+
     // Attach a visualization asset. Note that the cylinder is defined with
     // respect to the centroidal reference frame (which is the body reference
     // frame for a ChBody).
     auto cyl_2 = std::make_shared<ChCylinderShape>();
-    cyl_2->GetCylinderGeometry().p1 = ChVector<>(-1, 0, 0);
-    cyl_2->GetCylinderGeometry().p2 = ChVector<>(1, 0, 0);
-    cyl_2->GetCylinderGeometry().rad = 0.2;
+    cyl_2->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+    cyl_2->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
+    cyl_2->GetCylinderGeometry().rad = 0.1;
     pend_2->AddAsset(cyl_1);
+
     auto col_2 = std::make_shared<ChColorAsset>();
-    col_2->SetColor(ChColor(0.6f, 0, 0));
-    pend_2->AddAsset(col_1);
+    col_2->SetColor(ChColor(0, 0, .6f));
+    pend_2->AddAsset(col_2);
+
+    auto joint_cyl_2 = std::make_shared<ChCylinderShape>();
+    joint_cyl_2->GetCylinderGeometry().p1 = ChVector<>(0, 0, -.2);
+    joint_cyl_2->GetCylinderGeometry().p2 = ChVector<>(0, 0, .2);
+    joint_cyl_2->GetCylinderGeometry().rad = 0.2;
+    pend_2->AddAsset(joint_cyl_2);
 
     // Specify the initial position of the pendulum (horizontal, pointing towards
     // positive X). In this case, we set the absolute position of its center of
     // mass.
-    pend_1->SetPos(ChVector<>(1, 0, 0));
-    pend_2->SetPos(ChVector<>(3, 0, 0));
+    pend_1->SetPos(ChVector<>(-0.353553, -0.353553, 0));
+    pend_1->GetRot().Q_from_AngZ(CH_C_PI / 4);
+    pend_2->SetPos(ChVector<>(-0.836516, -0.224144, 0));
+    pend_2->GetRot().Q_from_AngZ(-CH_C_PI / 6);
 
     // Create a revolute joint to connect pendulum to ground. We specify the link
     // coordinate frame in the absolute frame.
     auto rev_1 = std::make_shared<ChLinkLockRevolute>();
-    rev_1->Initialize(ground, pend_1, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
+    rev_1->Initialize(ground, pend_1, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)),
+                      ChCoordsys<>(ChVector<>(.5, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
     system.AddLink(rev_1);
 
     auto rev_2 = std::make_shared<ChLinkLockRevolute>();
-    rev_2->Initialize(pend_1, pend_2, ChCoordsys<>(ChVector<>(2, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
+    rev_2->Initialize(pend_1, pend_2, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)),
+                      ChCoordsys<>(ChVector<>(.5, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
     system.AddLink(rev_2);
 
     // Create the Irrlicht application
@@ -155,6 +167,20 @@ int main(int argc, char* argv[]) {
 
     while (application.GetDevice()->run()) {
         application.BeginScene();
+
+        auto bodies = system.Get_bodylist();
+        auto links = system.Get_linklist();
+        for (int i = 0; i < bodies->size(); ++i) {
+            auto b = bodies->at(i);
+            std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
+                      << b->GetPos().z() << " mass is " << b->GetMass() << std::endl;
+            std::cout << b->GetRot().e0() << "," << b->GetRot().e1() << "," << b->GetRot().e2() << ","
+                      << b->GetRot().e3() << std::endl;
+        }
+        for (int i = 0; i < links->size(); ++i) {
+            auto b = links->at(i);
+            std::cout << b->GetName() << std::endl;
+        }
 
         application.DrawAll();
 
