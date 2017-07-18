@@ -80,7 +80,12 @@ void initFunctionTable() {  // Setup lambda table for body parsing
             newBody->AddAsset(body_col);
 
         } else {
-            // Give body mass and color
+            auto cyl_1 = std::make_shared<ChCylinderShape>();
+            cyl_1->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+            cyl_1->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
+            cyl_1->GetCylinderGeometry().rad = 0.1;
+            newBody->AddAsset(cyl_1);
+            // Give body mass and color and rod
             newBody->SetMass(std::stod(fieldNode->value()));
             auto body_col = std::make_shared<ChColorAsset>();
             body_col->SetColor(ChColor(0, 0, .6f));
@@ -190,11 +195,16 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         xml_node<>* coordinates =
             jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
 
-        double windup = std::stod(coordinates->first_node("default_value")->value());
-
+        // Also need initial position and velocity
         // I'm guessing windup is important here
+        double windup = std::stod(coordinates->first_node("default_value")->value());
+        ChQuaternion<> windupQ;
+        windupQ.Q_from_AngZ(windup);
+
         // Rotate from child's frame to joint's frame to parent's frame to global frame
-        newBody->SetRot(parentOrientation * jointOrientationInParent * jointOrientationInChild.GetInverse());
+        // newBody->SetRot(parentOrientation * jointOrientationInParent * windupQ *
+        // jointOrientationInChild.GetInverse());
+        newBody->SetRot(jointOrientationInChild.GetInverse() * windupQ * jointOrientationInParent * parentOrientation);
         // Use orientation to get position for child body
         newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
         assert(newBody.GetRot.Length() == 1);
@@ -209,6 +219,8 @@ void initFunctionTable() {  // Setup lambda table for body parsing
                   << jointPosInChild.z() << std::endl;
         std::cout << "Putting body " << newBody->GetName() << " at " << newBody->GetPos().x() << ","
                   << newBody->GetPos().y() << "," << newBody->GetPos().z() << std::endl;
+        std::cout << "Orientation is " << newBody->GetRot().e0() << newBody->GetRot().e1() << newBody->GetRot().e2()
+                  << newBody->GetRot().e3() << std::endl;
 
         // Make a revolute joint for now, this should be its own function call later
         auto joint = std::make_shared<ChLinkLockRevolute>();
@@ -291,6 +303,8 @@ int main(int argc, char* argv[]) {
             auto b = bodies->at(i);
             std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
                       << b->GetPos().z() << " mass is " << b->GetMass() << std::endl;
+            std::cout << b->GetRot().e0() << "," << b->GetRot().e1() << "," << b->GetRot().e2() << ","
+                      << b->GetRot().e3() << std::endl;
         }
         for (int i = 0; i < links->size(); ++i) {
             auto b = links->at(i);
