@@ -23,14 +23,15 @@ using namespace chrono::irrlicht;
 using namespace irr;
 using namespace rapidxml;
 
-double color = .2;
-
+// Maps xml to corresponding lambda helper functions that parse into a ChSystem
 std::map<std::string, std::function<void(xml_node<>*, ChSystem&, std::shared_ptr<ChBody>)>> function_table;
 
+// Creates ChBody and parses its various properties from its XML child nodes
 bool parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
-    // Node containing all of body information
-    xml_node<>* fieldNode = bodyNode->first_node();
+    // Make a new body and name it for later
     std::cout << "New body " << bodyNode->first_attribute("name")->value() << std::endl;
+    // TODO - This should eventually be a ChBodyAuxRef but polymorphism should make that easy
+    // I don't want to debug two things at once
     auto newBody = std::make_shared<ChBody>();
     newBody->SetName(bodyNode->first_attribute("name")->value());
 
@@ -42,11 +43,14 @@ bool parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
     newBody->AddAsset(body_cyl);
     my_system.Add(newBody);
 
-    // newBody->SetBodyFixed(true);
+    newBody->SetBodyFixed(true);
+
+    // First node in linked list of fields
+    xml_node<>* fieldNode = bodyNode->first_node();
 
     // Parse the body, field-by-field
     while (fieldNode != NULL) {
-        std::cout << "Field is " << *fieldNode << " name is " << fieldNode->name() << std::endl;
+        // std::cout << "Field is " << *fieldNode << " name is " << fieldNode->name() << std::endl;
 
         // Parse in body information
         function_table[fieldNode->name()](fieldNode, my_system, newBody);
@@ -55,29 +59,31 @@ bool parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
     }
 }
 
+// Get an STL vector from a string, used to make the xml parsing cleaner
 std::vector<std::string> strToVect(const char* string) {
     std::istringstream buf(string);
     std::istream_iterator<std::string> beg(buf), end;
-
     return std::vector<std::string>(beg, end);
 }
+
+// This is where the magic happens -- it sets up a map of strings to lambdas
+// that do the heavy lifting of osim -> chrono parsing
 void initFunctionTable() {  // Setup lambda table for body parsing
     function_table["mass"] = [](xml_node<>* fieldNode, ChSystem& my_system, std::shared_ptr<ChBody> newBody) {
         if (std::stod(fieldNode->value()) == 0) {
             // Ground-like body, massless => fixed
-            std::cout << "Body is fixed" << std::endl;
             newBody->SetBodyFixed(true);
             newBody->SetCollide(false);
             auto body_col = std::make_shared<ChColorAsset>();
+            // Ground has special color to identify it
             body_col->SetColor(ChColor(0, 0, 0));
             newBody->AddAsset(body_col);
 
         } else {
+            // Give body mass and color
             newBody->SetMass(std::stod(fieldNode->value()));
-
             auto body_col = std::make_shared<ChColorAsset>();
-            body_col->SetColor(ChColor(color, 2 * color, 3 * color));
-            color += .2;
+            body_col->SetColor(ChColor(0, 0, .6f));
             newBody->AddAsset(body_col);
         }
     };
@@ -128,12 +134,13 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         newBody->SetInertiaXY(inertiaXY);
     };
     function_table["Joint"] = [](xml_node<>* fieldNode, ChSystem& my_system, std::shared_ptr<ChBody> newBody) {
-        // Deduce position of child body, make a joint between them
+        // If there are no joints, this is hopefully the ground (or another global parent??)
         if (fieldNode->first_node() == NULL) {
             std::cout << "No joints for this body " << std::endl;
             return;
         }
 
+        // Deduce child body from joint orientation
         xml_node<>* jointNode = fieldNode->first_node();
         // Make a joint here
         std::cout << "Making a " << jointNode->name() << " with " << jointNode->first_node("parent_body")->value()
@@ -147,7 +154,8 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         if (parent != nullptr) {
             std::cout << "other body found!" << std::endl;
         } else {
-            std::cout << "Body not found " << std::endl;
+            std::cout << "Parent not found!!!!" << std::endl;
+            exit(1);
         }
 
         auto parentPos = parent->GetPos();
@@ -163,6 +171,8 @@ void initFunctionTable() {  // Setup lambda table for body parsing
 
         // Get quaternions from file
         elems = strToVect(jointNode->first_node("orientation_in_parent")->value());
+        // Z X Y
+
         ChQuaternion<> jointOrientationInParent;
         jointOrientationInParent.Q_from_NasaAngles(
             ChVector<>(std::stod(elems[2]), std::stod(elems[0]), std::stod(elems[1])));
@@ -172,9 +182,18 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         jointOrientationInChild.Q_from_NasaAngles(
             ChVector<>(std::stod(elems[2]), std::stod(elems[0]), std::stod(elems[1])));
 
+        // TODO -- I'm pretty sure these transforms are the bug(s)
+
+        // Get the joint's global position, hopefully
         ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
 
-        // Get orientation for child body
+        xml_node<>* coordinates =
+            jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
+
+        double windup = std::stod(coordinates->first_node("default_value")->value());
+
+        // I'm guessing windup is important here
+        // Rotate from child's frame to joint's frame to parent's frame to global frame
         newBody->SetRot(parentOrientation * jointOrientationInParent * jointOrientationInChild.GetInverse());
         // Use orientation to get position for child body
         newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
@@ -191,22 +210,13 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         std::cout << "Putting body " << newBody->GetName() << " at " << newBody->GetPos().x() << ","
                   << newBody->GetPos().y() << "," << newBody->GetPos().z() << std::endl;
 
+        // Make a revolute joint for now, this should be its own function call later
         auto joint = std::make_shared<ChLinkLockRevolute>();
-        if (newBody->GetNameString() == std::string("rod1")) {
-            joint->Initialize(parent, newBody, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
-            std::cout << "rod1" << std::endl;
-        } else {
-            joint->Initialize(parent, newBody, ChCoordsys<>(ChVector<>(2, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
-            std::cout << "rod2" << std::endl;
-        }
-        // joint->Initialize(parent, newBody, true, ChCoordsys<>(jointPosInParent, jointOrientationInParent),
-        //                   ChCoordsys<>(jointPosInChild, jointOrientationInChild));
+        // joint->Initialize(parent, newBody, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
+        joint->Initialize(parent, newBody, true, ChCoordsys<>(jointPosInParent, jointOrientationInParent),
+                          ChCoordsys<>(jointPosInChild, jointOrientationInChild));
         joint->SetNameString(std::string(parent->GetName()) + "_" + std::string(newBody->GetName()));
-        // my_system.AddLink(joint);
-
-        // Z X Y
-        // auto jointOrientationInParent = std::stod(jointNode->first_node("orientation_in_parent")->value());
-        // std::cout << jointOrientationInParent << std::endl;
+        my_system.AddLink(joint);
     };
     // function_table["PinJoint"] = [](xml_node<>* fieldNode, ChSystem& my_system, std::shared_ptr<ChBody>
     // newBody) {
@@ -261,6 +271,7 @@ int main(int argc, char* argv[]) {
         bodyNode = bodyNode->next_sibling();
     }
 
+    // Setup Irrlicht
     ChIrrApp application(&my_system, L"ChBodyAuxRef demo", core::dimension2d<u32>(800, 600), false, true);
     application.AddTypicalLogo();
     application.AddTypicalSky();
