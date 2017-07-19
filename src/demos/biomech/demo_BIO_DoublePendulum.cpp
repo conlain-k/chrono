@@ -37,13 +37,13 @@ bool parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
 
     // Give it a cylinder for now
     auto body_cyl = std::make_shared<ChCylinderShape>();
-    body_cyl->GetCylinderGeometry().p1 = ChVector<>(0, 0, 1.2);
-    body_cyl->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0.8);
+    body_cyl->GetCylinderGeometry().p1 = ChVector<>(0, 0, -.2);
+    body_cyl->GetCylinderGeometry().p2 = ChVector<>(0, 0, .2);
     body_cyl->GetCylinderGeometry().rad = 0.2;
     newBody->AddAsset(body_cyl);
     my_system.Add(newBody);
 
-    newBody->SetBodyFixed(true);
+    // newBody->SetBodyFixed(true);
 
     // First node in linked list of fields
     xml_node<>* fieldNode = bodyNode->first_node();
@@ -81,7 +81,7 @@ void initFunctionTable() {  // Setup lambda table for body parsing
 
         } else {
             auto cyl_1 = std::make_shared<ChCylinderShape>();
-            cyl_1->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+            cyl_1->GetCylinderGeometry().p1 = ChVector<>(0, .5, 0);
             cyl_1->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
             cyl_1->GetCylinderGeometry().rad = 0.1;
             newBody->AddAsset(cyl_1);
@@ -190,7 +190,6 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         // TODO -- I'm pretty sure these transforms are the bug(s)
 
         // Get the joint's global position, hopefully
-        ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
 
         xml_node<>* coordinates =
             jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
@@ -204,8 +203,21 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         // Rotate from child's frame to joint's frame to parent's frame to global frame
         // newBody->SetRot(parentOrientation * jointOrientationInParent * windupQ *
         // jointOrientationInChild.GetInverse());
+
+        ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
+        ChQuaternion<> jointOrientationGlobal = jointOrientationInParent * parentOrientation;
+        // ChCoordsys<> parentCoords(parentPos, parentOrientation);
+        // ChCoordsys<> jointCoordsInParent(jointPosInParent, jointOrientationInParent);
+        // ChCoordsys<> jointCoordsInChildInverse(-jointPosInChild, jointOrientationInChild.GetInverse());
+        // ChCoordsys<> jointAdjustment(ChVector<>(0, 0, 0), windupQ);
+        //
+        // newBody->SetCoord(jointCoordsInChildInverse * jointAdjustment * jointCoordsInParent * parentCoords);
+
         newBody->SetRot(jointOrientationInChild.GetInverse() * windupQ * jointOrientationInParent * parentOrientation);
-        // Use orientation to get position for child body
+
+        // // newBody->SetRot(parentOrientation * jointOrientationInParent * windupQ.GetInverse() *
+        // //                 jointOrientationInChild.GetInverse());
+        // // Use orientation to get position for child body
         newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
         assert(newBody.GetRot.Length() == 1);
 
@@ -217,6 +229,7 @@ void initFunctionTable() {  // Setup lambda table for body parsing
                   << jointPosGlobal.z() << std::endl;
         std::cout << "Joint is at child " << jointPosInChild.x() << "," << jointPosInChild.y() << ","
                   << jointPosInChild.z() << std::endl;
+        std::cout << windup << std::endl;
         std::cout << "Putting body " << newBody->GetName() << " at " << newBody->GetPos().x() << ","
                   << newBody->GetPos().y() << "," << newBody->GetPos().z() << std::endl;
         std::cout << "Orientation is " << newBody->GetRot().e0() << newBody->GetRot().e1() << newBody->GetRot().e2()
@@ -224,9 +237,12 @@ void initFunctionTable() {  // Setup lambda table for body parsing
 
         // Make a revolute joint for now, this should be its own function call later
         auto joint = std::make_shared<ChLinkLockRevolute>();
-        // joint->Initialize(parent, newBody, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
-        joint->Initialize(parent, newBody, true, ChCoordsys<>(jointPosInParent, jointOrientationInParent),
-                          ChCoordsys<>(jointPosInChild, jointOrientationInChild));
+        joint->Initialize(parent, newBody, ChCoordsys<>(jointPosGlobal, jointOrientationGlobal));
+        std::cout << "putting joint at " << jointPosGlobal.x() << "," << jointPosGlobal.y() << "," << jointPosGlobal.z()
+                  << "|" << jointOrientationGlobal.e0() << "," << jointOrientationGlobal.e1() << ","
+                  << jointOrientationGlobal.e2() << "," << jointOrientationGlobal.e3() << std::endl;
+        // joint->Initialize(parent, newBody, true, ChCoordsys<>(jointPosInParent, jointOrientationInParent),
+        //                   ChCoordsys<>(jointPosInChild, jointOrientationInChild));
         joint->SetNameString(std::string(parent->GetName()) + "_" + std::string(newBody->GetName()));
         my_system.AddLink(joint);
     };
@@ -295,10 +311,11 @@ int main(int argc, char* argv[]) {
 
     // Simulation loop
     application.SetTimestep(0.001);
+    auto bodies = my_system.Get_bodylist();
+    auto links = my_system.Get_linklist();
+
     while (application.GetDevice()->run()) {
         application.BeginScene();
-        auto bodies = my_system.Get_bodylist();
-        auto links = my_system.Get_linklist();
         for (int i = 0; i < bodies->size(); ++i) {
             auto b = bodies->at(i);
             std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
