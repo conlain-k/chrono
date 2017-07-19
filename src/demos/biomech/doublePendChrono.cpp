@@ -94,7 +94,7 @@ int main(int argc, char* argv[]) {
     // respect to the centroidal reference frame (which is the body reference
     // frame for a ChBody).
     auto cyl_1 = std::make_shared<ChCylinderShape>();
-    cyl_1->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+    cyl_1->GetCylinderGeometry().p1 = ChVector<>(0, .5, 0);
     cyl_1->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
     cyl_1->GetCylinderGeometry().rad = 0.1;
     pend_1->AddAsset(cyl_1);
@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
     // respect to the centroidal reference frame (which is the body reference
     // frame for a ChBody).
     auto cyl_2 = std::make_shared<ChCylinderShape>();
-    cyl_2->GetCylinderGeometry().p1 = ChVector<>(.5, 0, 0);
+    cyl_2->GetCylinderGeometry().p1 = ChVector<>(0, .5, 0);
     cyl_2->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
     cyl_2->GetCylinderGeometry().rad = 0.1;
     pend_2->AddAsset(cyl_1);
@@ -132,20 +132,20 @@ int main(int argc, char* argv[]) {
     // positive X). In this case, we set the absolute position of its center of
     // mass.
     pend_1->SetPos(ChVector<>(-0.353553, -0.353553, 0));
-    pend_1->GetRot().Q_from_AngZ(CH_C_PI / 4);
+    pend_1->GetRot().Q_from_AngZ(-CH_C_PI / 4);
     pend_2->SetPos(ChVector<>(-0.836516, -0.224144, 0));
-    pend_2->GetRot().Q_from_AngZ(-CH_C_PI / 6);
+    pend_2->GetRot().Q_from_AngZ(-(CH_C_PI / 3) - (CH_C_PI / 4));
 
     // Create a revolute joint to connect pendulum to ground. We specify the link
     // coordinate frame in the absolute frame.
     auto rev_1 = std::make_shared<ChLinkLockRevolute>();
     rev_1->Initialize(ground, pend_1, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)),
-                      ChCoordsys<>(ChVector<>(.5, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
+                      ChCoordsys<>(ChVector<>(0, .5, 0), ChQuaternion<>(1, 0, 0, 0)));
     system.AddLink(rev_1);
 
     auto rev_2 = std::make_shared<ChLinkLockRevolute>();
     rev_2->Initialize(pend_1, pend_2, true, ChCoordsys<>(ChVector<>(0, 0, 0), ChQuaternion<>(1, 0, 0, 0)),
-                      ChCoordsys<>(ChVector<>(.5, 0, 0), ChQuaternion<>(1, 0, 0, 0)));
+                      ChCoordsys<>(ChVector<>(0, .5, 0), ChQuaternion<>(1, 0, 0, 0)));
     system.AddLink(rev_2);
 
     // Create the Irrlicht application
