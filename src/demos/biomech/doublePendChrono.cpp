@@ -168,19 +168,19 @@ int main(int argc, char* argv[]) {
     while (application.GetDevice()->run()) {
         application.BeginScene();
 
-        auto bodies = system.Get_bodylist();
-        auto links = system.Get_linklist();
-        for (int i = 0; i < bodies->size(); ++i) {
-            auto b = bodies->at(i);
-            std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
-                      << b->GetPos().z() << " mass is " << b->GetMass() << std::endl;
-            std::cout << b->GetRot().e0() << "," << b->GetRot().e1() << "," << b->GetRot().e2() << ","
-                      << b->GetRot().e3() << std::endl;
-        }
-        for (int i = 0; i < links->size(); ++i) {
-            auto b = links->at(i);
-            std::cout << b->GetName() << std::endl;
-        }
+        // auto bodies = system.Get_bodylist();
+        // auto links = system.Get_linklist();
+        // for (int i = 0; i < bodies->size(); ++i) {
+        //     auto b = bodies->at(i);
+        //     std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
+        //               << b->GetPos().z() << " mass is " << b->GetMass() << std::endl;
+        //     std::cout << b->GetRot().e0() << "," << b->GetRot().e1() << "," << b->GetRot().e2() << ","
+        //               << b->GetRot().e3() << std::endl;
+        // }
+        // for (int i = 0; i < links->size(); ++i) {
+        //     auto b = links->at(i);
+        //     std::cout << b->GetName() << std::endl;
+        // }
 
         application.DrawAll();
 
