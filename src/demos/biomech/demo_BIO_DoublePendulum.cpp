@@ -211,7 +211,7 @@ void initFunctionTable() {  // Setup lambda table for body parsing
             double windupY = std::stod(coordinates->first_node("default_value")->value());
             ChQuaternion<> Qx, Qy;
             Qx.Q_from_AngX(windupX);
-            Qy.Q_from_AngZ(windupY);
+            Qy.Q_from_AngY(windupY);
             offsetQ = Qx * Qy;
         } else if ((std::string(jointNode->name()) == std::string("BallJoint"))) {
             // X Y Z
@@ -251,8 +251,8 @@ void initFunctionTable() {  // Setup lambda table for body parsing
                   << jointPosInChild.z() << std::endl;
         std::cout << "Putting body " << newBody->GetName() << " at " << newBody->GetPos().x() << ","
                   << newBody->GetPos().y() << "," << newBody->GetPos().z() << std::endl;
-        std::cout << "Orientation is " << newBody->GetRot().e0() << newBody->GetRot().e1() << newBody->GetRot().e2()
-                  << newBody->GetRot().e3() << std::endl;
+        std::cout << "Orientation is " << newBody->GetRot().e0() << "," << newBody->GetRot().e1() << ","
+                  << newBody->GetRot().e2() << "," << newBody->GetRot().e3() << std::endl;
 
         // Make a joint, depending on what it actually is
         if (std::string(jointNode->name()) == std::string("PinJoint")) {
@@ -283,7 +283,11 @@ void initFunctionTable() {  // Setup lambda table for body parsing
         } else {
             // Cry
             std::cout << "Unknown Joint type " << jointNode->name() << " between " << parent->GetName() << " and "
-                      << newBody->GetName() << std::endl;
+                      << newBody->GetName() << "Making spherical standin." << std::endl;
+            auto joint = std::make_shared<ChLinkLockSpherical>();
+            joint->Initialize(parent, newBody, ChCoordsys<>(jointPosGlobal, jointOrientationGlobal));
+            joint->SetNameString(std::string(jointNode->first_attribute("name")->value()) + "_standin");
+            my_system.AddLink(joint);
         }
 
         std::cout << "putting joint at " << jointPosGlobal.x() << "," << jointPosGlobal.y() << "," << jointPosGlobal.z()
