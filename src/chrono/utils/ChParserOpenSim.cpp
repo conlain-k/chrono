@@ -17,6 +17,8 @@
 // =============================================================================
 
 #include "chrono/utils/ChParserOpenSim.h"
+#include "chrono_thirdparty/rapidxml/rapidxml_print.hpp"
+#include "chrono_thirdparty/rapidxml/rapidxml_utils.hpp"
 
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/physics/ChSystemSMC.h"
@@ -33,7 +35,27 @@ ChParserOpenSim::ChParserOpenSim() {
     initFunctionTable();
 }
 
-void ChParserOpenSim::parse(ChSystem& system, const std::string& filename) {
+void ChParserOpenSim::parse(ChSystem& p_system, const std::string& filename) {
+    rapidxml::file<char> file(filename.c_str());
+
+    xml_document<> doc;         // character type defaults to char
+    doc.parse<0>(file.data());  // 0 means default parse flags
+
+    // Hold list of bodies
+    xml_node<>* bodySet = doc.first_node()->first_node("Model")->first_node("BodySet")->first_node("objects");
+
+    // Get gravity from model and set it in system
+    auto elems = strToDoubleVector(doc.first_node()->first_node("Model")->first_node("gravity")->value());
+    p_system.Set_G_acc(ChVector<>(elems[0], elems[1], elems[2]));
+
+    // Holds list of fields for body
+    xml_node<>* bodyNode = bodySet->first_node();
+
+    // Loop through each body
+    while (bodyNode != NULL) {
+        parseBody(bodyNode, p_system);
+        bodyNode = bodyNode->next_sibling();
+    }
     //// TODO
 }
 
@@ -84,10 +106,10 @@ bool ChParserOpenSim::parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
 }
 
 // Get an STL vector from a string, used to make the xml parsing cleaner
-std::vector<std::string> strToVect(const char* string) {
+std::vector<double> ChParserOpenSim::strToDoubleVector(const char* string) {
     std::istringstream buf(string);
-    std::istream_iterator<std::string> beg(buf), end;
-    return std::vector<std::string>(beg, end);
+    std::istream_iterator<double> beg(buf), end;
+    return std::vector<double>(beg, end);
 }
 
 // This is where the magic happens -- it sets up a map of strings to lambdas
@@ -187,41 +209,30 @@ void ChParserOpenSim::initFunctionTable() {
             exit(1);
         }
 
-        auto parentPos = parent->GetPos();
-        auto parentOrientation = parent->GetRot();
+        // Global to parent
+        auto X_G_P = *parent;
 
-        // Get vectors from file
-        std::vector<std::string> elems = strToVect(jointNode->first_node("location_in_parent")->value());
-        ChVector<> jointPosInParent = ChVector<>(std::stod(elems[0]), std::stod(elems[1]), std::stod(elems[2]));
+        // Get joint's position in parent frame
+        auto elems = ChParserOpenSim::strToDoubleVector(jointNode->first_node("location_in_parent")->value());
+        ChVector<> jointPosInParent = ChVector<>(elems[0], elems[1], elems[2]);
 
-        elems = strToVect(jointNode->first_node("location")->value());
-        ChVector<> jointPosInChild = ChVector<>(std::stod(elems[0]), std::stod(elems[1]), std::stod(elems[2]));
-        std::cout << jointPosInChild.x() << "," << jointPosInChild.y() << "," << jointPosInChild.z() << std::endl;
+        // Get joint's orientation in parent frame
+        elems = ChParserOpenSim::strToDoubleVector(jointNode->first_node("orientation_in_parent")->value());
+        ChQuaternion<> jointOrientationInParent = Q_from_AngX(elems[0]) * Q_from_AngY(elems[1]) * Q_from_AngZ(elems[2]);
 
-        // Get quaternions from file
-        elems = strToVect(jointNode->first_node("orientation_in_parent")->value());
-        // Z X Y
+        // Parent to joint in parent
+        ChFrame<> X_P_F(jointPosInParent, jointOrientationInParent);
 
-        ChQuaternion<> jointOrientationInParent;
-        jointOrientationInParent.Q_from_NasaAngles(
-            ChVector<>(std::stod(elems[2]), std::stod(elems[0]), std::stod(elems[1])));
+        // Offset location and orientation caused by joint initial configuration, default is identity
+        ChVector<> t_F_M(0, 0, 0);
+        ChQuaternion<> R_F_M(1, 0, 0, 0);
 
-        elems = strToVect(jointNode->first_node("orientation")->value());
-        ChQuaternion<> jointOrientationInChild;
-        jointOrientationInChild.Q_from_NasaAngles(
-            ChVector<>(std::stod(elems[2]), std::stod(elems[0]), std::stod(elems[1])));
-
-        // Offset location and orientation caused by joint initial configuration
-        ChVector<> offsetV;
-        ChQuaternion<> offsetQ;
-        // Start as no rotation
-        offsetQ.SetUnit();
         // Get offsets, depending on joint type
         if (std::string(jointNode->name()) == std::string("PinJoint")) {
             xml_node<>* coordinates =
                 jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
-            double windup = std::stod(coordinates->first_node("default_value")->value());
-            offsetQ.Q_from_AngZ(windup);
+            double thetaZ = std::stod(coordinates->first_node("default_value")->value());
+            R_F_M = Q_from_AngZ(thetaZ);
         } else if ((std::string(jointNode->name()) == std::string("WeldJoint"))) {
             // Do absolutely nothing, they're stuck together
         } else if ((std::string(jointNode->name()) == std::string("UniversalJoint"))) {
@@ -229,89 +240,113 @@ void ChParserOpenSim::initFunctionTable() {
             // Coords go Z then X rotation
             xml_node<>* coordinates =
                 jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
-            double windupX = std::stod(coordinates->first_node("default_value")->value());
+            double thetaX = std::stod(coordinates->first_node("default_value")->value());
             coordinates = coordinates->next_sibling();
-            double windupY = std::stod(coordinates->first_node("default_value")->value());
-            ChQuaternion<> Qx, Qy;
-            Qx.Q_from_AngX(windupX);
-            Qy.Q_from_AngZ(windupY);
-            offsetQ = Qx * Qy;
+            double thetaY = std::stod(coordinates->first_node("default_value")->value());
+            R_F_M = Q_from_AngX(thetaX) * Q_from_AngY(thetaY);
         } else if ((std::string(jointNode->name()) == std::string("BallJoint"))) {
             // X Y Z
             xml_node<>* coordinates =
                 jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
-            double windupX = std::stod(coordinates->first_node("default_value")->value());
+            double thetaX = std::stod(coordinates->first_node("default_value")->value());
             coordinates = coordinates->next_sibling();
-            double windupY = std::stod(coordinates->first_node("default_value")->value());
+            double thetaY = std::stod(coordinates->first_node("default_value")->value());
             coordinates = coordinates->next_sibling();
-            double windupZ = std::stod(coordinates->first_node("default_value")->value());
-            ChQuaternion<> Qx, Qy, Qz;
-            Qx.Q_from_AngX(windupX);
-            Qy.Q_from_AngY(windupY);
-            Qz.Q_from_AngZ(windupZ);
-            offsetQ = Qx * Qy * Qz;
+            double thetaZ = std::stod(coordinates->first_node("default_value")->value());
+            R_F_M = Q_from_AngX(thetaX) * Q_from_AngY(thetaY) * Q_from_AngZ(thetaZ);
         } else if ((std::string(jointNode->name()) == std::string("CustomJoint"))) {
             // Cry
         }
 
-        ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
-        ChQuaternion<> jointOrientationGlobal = jointOrientationInParent * parentOrientation;
+        // Joint in parent to joint in child
+        ChFrame<> X_F_M(t_F_M, R_F_M);
 
-        newBody->SetRot(jointOrientationInChild.GetInverse() * offsetQ * jointOrientationInParent * parentOrientation);
+        // Get joint's position in child frame
+        elems = ChParserOpenSim::strToDoubleVector(jointNode->first_node("location")->value());
+        ChVector<> jointPosInChild = ChVector<>(elems[0], elems[1], elems[2]);
 
-        //  Use orientation to get position for child body
-        newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
+        // Get joint's orientation in child frame
+        elems = ChParserOpenSim::strToDoubleVector(jointNode->first_node("orientation")->value());
+        ChQuaternion<> jointOrientationInChild = Q_from_AngX(elems[0]) * Q_from_AngY(elems[1]) * Q_from_AngZ(elems[2]);
+
+        // Joint in child to child
+        ChFrame<> X_B_M(jointPosInChild, jointOrientationInChild);
+
+        auto X_G_B = X_G_P * X_P_F * X_F_M * X_B_M.GetInverse();
+        newBody->SetCoord(X_G_B.GetCoord());
+
+        // ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
+        // ChQuaternion<> jointOrientationGlobal = jointOrientationInParent * parentOrientation;
+        //
+        ChFrame<> jointCoords = X_G_P * X_P_F;
+        //
+        // newBody->SetCoord(X_G_P * X_P_F * X_F_M * X_M_B);
+
+        // newBody->SetRot(parentOrientation * jointOrientationInParent * R_F_M *
+        //                 jointOrientationInChild.GetInverse());
+        //
+        // newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
 
         assert(std::abs(newBody->GetRot().Length() - 1) < 1e-10);
 
-        std::cout << "Parent is at global " << parentPos.x() << "," << parentPos.y() << "," << parentPos.z()
-                  << std::endl;
+        std::cout << "Parent is at global " << parent->GetPos().x() << "," << parent->GetPos().y() << ","
+                  << parent->GetPos().z() << "|" << parent->GetRot().e0() << "," << parent->GetRot().e1() << ","
+                  << parent->GetRot().e2() << "," << parent->GetRot().e3() << std::endl;
         std::cout << "Joint is at parent " << jointPosInParent.x() << "," << jointPosInParent.y() << ","
-                  << jointPosInParent.z() << std::endl;
-        std::cout << "Joint is at global " << jointPosGlobal.x() << "," << jointPosGlobal.y() << ","
-                  << jointPosGlobal.z() << std::endl;
+                  << jointPosInParent.z() << "|" << jointOrientationInParent.e0() << ","
+                  << jointOrientationInParent.e1() << "," << jointOrientationInParent.e2() << ","
+                  << jointOrientationInParent.e3() << std::endl;
+        std::cout << "Joint is at global " << jointCoords.GetPos().x() << "," << jointCoords.GetPos().y() << ","
+                  << jointCoords.GetPos().z() << "|" << jointCoords.GetRot().e0() << "," << jointCoords.GetRot().e1()
+                  << "," << jointCoords.GetRot().e2() << "," << jointCoords.GetRot().e3() << std::endl;
         std::cout << "Joint is at child " << jointPosInChild.x() << "," << jointPosInChild.y() << ","
-                  << jointPosInChild.z() << std::endl;
+                  << jointPosInChild.z() << "|" << jointOrientationInChild.e0() << "," << jointOrientationInChild.e1()
+                  << "," << jointOrientationInChild.e2() << "," << jointOrientationInChild.e3() << std::endl;
         std::cout << "Putting body " << newBody->GetName() << " at " << newBody->GetPos().x() << ","
                   << newBody->GetPos().y() << "," << newBody->GetPos().z() << std::endl;
-        std::cout << "Orientation is " << newBody->GetRot().e0() << newBody->GetRot().e1() << newBody->GetRot().e2()
-                  << newBody->GetRot().e3() << std::endl;
+        std::cout << "Orientation is " << newBody->GetRot().e0() << "," << newBody->GetRot().e1() << ","
+                  << newBody->GetRot().e2() << "," << newBody->GetRot().e3() << std::endl;
 
         // Make a joint, depending on what it actually is
         if (std::string(jointNode->name()) == std::string("PinJoint")) {
             std::cout << "Pin joint!" << std::endl;
             auto joint = std::make_shared<ChLinkLockRevolute>();
-            joint->Initialize(parent, newBody, ChCoordsys<>(jointPosGlobal, jointOrientationGlobal));
+            joint->Initialize(parent, newBody, jointCoords.GetCoord());
             joint->SetNameString(jointNode->first_attribute("name")->value());
             my_system.AddLink(joint);
         } else if ((std::string(jointNode->name()) == std::string("WeldJoint"))) {
             std::cout << "Weld joint!" << std::endl;
             auto joint = std::make_shared<ChLinkLockLock>();
-            joint->Initialize(parent, newBody, ChCoordsys<>(jointPosGlobal, jointOrientationGlobal));
+            joint->Initialize(parent, newBody, jointCoords.GetCoord());
             joint->SetNameString(jointNode->first_attribute("name")->value());
             my_system.AddLink(joint);
         } else if ((std::string(jointNode->name()) == std::string("UniversalJoint"))) {
             // Do some universal magic here
             std::cout << "Universal joint!" << std::endl;
             auto joint = std::make_shared<ChLinkUniversal>();
-            joint->Initialize(parent, newBody, ChFrame<>(jointPosGlobal, jointOrientationGlobal));
+            joint->Initialize(parent, newBody, jointCoords);
             joint->SetNameString(jointNode->first_attribute("name")->value());
             my_system.AddLink(joint);
         } else if ((std::string(jointNode->name()) == std::string("BallJoint"))) {
             std::cout << "Ball joint!" << std::endl;
             auto joint = std::make_shared<ChLinkLockSpherical>();
-            joint->Initialize(parent, newBody, ChCoordsys<>(jointPosGlobal, jointOrientationGlobal));
+            joint->Initialize(parent, newBody, jointCoords.GetCoord());
             joint->SetNameString(jointNode->first_attribute("name")->value());
             my_system.AddLink(joint);
         } else {
             // Cry
             std::cout << "Unknown Joint type " << jointNode->name() << " between " << parent->GetName() << " and "
-                      << newBody->GetName() << std::endl;
+                      << newBody->GetName() << "Making spherical standin." << std::endl;
+            auto joint = std::make_shared<ChLinkLockSpherical>();
+            joint->Initialize(parent, newBody, jointCoords.GetCoord());
+            joint->SetNameString(std::string(jointNode->first_attribute("name")->value()) + "_standin");
+            my_system.AddLink(joint);
         }
 
-        std::cout << "putting joint at " << jointPosGlobal.x() << "," << jointPosGlobal.y() << "," << jointPosGlobal.z()
-                  << "|" << jointOrientationGlobal.e0() << "," << jointOrientationGlobal.e1() << ","
-                  << jointOrientationGlobal.e2() << "," << jointOrientationGlobal.e3() << std::endl;
+        // std::cout << "putting joint at " << jointPosGlobal.x() << "," << jointPosGlobal.y() << "," <<
+        // jointPosGlobal.z()
+        //           << "|" << jointOrientationGlobal.e0() << "," << jointOrientationGlobal.e1() << ","
+        //           << jointOrientationGlobal.e2() << "," << jointOrientationGlobal.e3() << std::endl;
 
     };
     // function_table["PinJoint"] = [](xml_node<>* fieldNode, ChSystem& my_system, std::shared_ptr<ChBody>

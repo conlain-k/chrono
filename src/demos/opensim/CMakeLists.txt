@@ -2,12 +2,12 @@
 # Add executables
 
 SET(DEMOS
-  demo_BIO_DoublePendulum
+  demo_OSIM_DoublePendulum
   doublePendChrono
 )
 
 
-MESSAGE(STATUS "Demo programs for BIOMECH module...")
+MESSAGE(STATUS "Demo programs for OpenSim module...")
 
 INCLUDE_DIRECTORIES(${CH_IRRLICHTINC})
 

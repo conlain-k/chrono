@@ -55,6 +55,8 @@ class ChApi ChParserOpenSim {
     /// Creates ChBody and parses its various properties from its XML child nodes
     bool parseBody(rapidxml::xml_node<>* bodyNode, ChSystem& my_system);
 
+    static std::vector<double> strToDoubleVector(const char* string);
+
     std::map<std::string, std::function<void(rapidxml::xml_node<>*, ChSystem&, std::shared_ptr<ChBody>)>>
         function_table;
 };

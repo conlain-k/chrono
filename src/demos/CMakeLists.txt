@@ -28,7 +28,7 @@ option(BUILD_DEMOS_BASE "Build demo programs for base Chrono module" TRUE)
 mark_as_advanced(FORCE BUILD_DEMOS_BASE)
 if(BUILD_DEMOS_BASE)
 	add_subdirectory(core)
-  add_subdirectory(biomech)
+  add_subdirectory(opensim)
 endif()
 
 if(ENABLE_MODULE_FEA)
