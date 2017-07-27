@@ -2,15 +2,13 @@
 # Add executables
 
 SET(DEMOS
-  demo_OSIM_DoublePendulum
-  doublePendChrono
+  demo_OSIM_test
 )
 
 
 MESSAGE(STATUS "Demo programs for OpenSim module...")
 
 INCLUDE_DIRECTORIES(${CH_IRRLICHTINC})
-
 
 FOREACH(PROGRAM ${DEMOS})
     MESSAGE(STATUS "...add ${PROGRAM}")

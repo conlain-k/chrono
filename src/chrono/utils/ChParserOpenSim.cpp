@@ -14,6 +14,11 @@
 //
 // Parser utility class for OpenSim input files.
 //
+// This uses several frame transforms for the forward kinematics pass. A
+// transform is denoted by `X_1_2`, where 1 is the initial fram and 2 is the
+// final frame. The frames are denoted g: global, P: parent, F: joint on parent,
+// M: joint on body, B: body. Thus, X_P_F is the transform from parent to joint.
+//
 // =============================================================================
 
 #include "chrono/utils/ChParserOpenSim.h"
@@ -28,6 +33,8 @@
 #include "chrono/assets/ChCylinderShape.h"
 #include "chrono/assets/ChSphereShape.h"
 
+#include <utility>
+
 namespace chrono {
 namespace utils {
 
@@ -36,6 +43,7 @@ using namespace rapidxml;
 ChParserOpenSim::ChParserOpenSim() {
     initFunctionTable();
 }
+static int body_idx = 0;
 
 void ChParserOpenSim::parse(ChSystem& p_system, const std::string& filename, ChParserOpenSim::VisType vis) {
     m_visType = vis;
@@ -83,6 +91,7 @@ bool ChParserOpenSim::parseBody(xml_node<>* bodyNode, ChSystem& my_system) {
     // I don't want to debug two things at once
     auto newBody = std::make_shared<ChBodyAuxRef>();
     newBody->SetName(bodyNode->first_attribute("name")->value());
+    newBody->SetIdentifier(body_idx++);
 
     // Give it a cylinder for now
     // auto body_cyl = std::make_shared<ChCylinderShape>();
@@ -125,16 +134,8 @@ void ChParserOpenSim::initFunctionTable() {
             body_col->SetColor(ChColor(0, 0, 0));
             newBody->AddAsset(body_col);
         } else {
-            // auto cyl_1 = std::make_shared<ChCylinderShape>();
-            // cyl_1->GetCylinderGeometry().p1 = ChVector<>(0, .5, 0);
-            // cyl_1->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
-            // cyl_1->GetCylinderGeometry().rad = 0.1;
-            // newBody->AddAsset(cyl_1);
             // Give body mass and color and rod
             newBody->SetMass(std::stod(fieldNode->value()));
-            // auto body_col = std::make_shared<ChColorAsset>();
-            // body_col->SetColor(ChColor(0, 0, .5f));
-            // newBody->AddAsset(body_col);
         }
     };
     function_table["mass_center"] = [](xml_node<>* fieldNode, const ChSystem& my_system,
@@ -144,21 +145,20 @@ void ChParserOpenSim::initFunctionTable() {
         // Opensim doesn't really use a rotated frame, so unit quaternion
         newBody->SetFrame_COG_to_REF(ChFrame<>(ChVector<>(elems[0], elems[1], elems[2]), ChQuaternion<>(1, 0, 0, 0)));
         // {
+        auto sphere = std::make_shared<ChSphereShape>();
+        sphere->GetSphereGeometry().rad = 0.2;
+        sphere->Pos = ChVector<>(elems[0], elems[1], elems[2]);
+        // sphere->Pos = ChVector<>(0, 0, 0);
+        newBody->AddAsset(sphere);
+        // }
+        // {
         //     auto sphere = std::make_shared<ChSphereShape>();
         //     sphere->GetSphereGeometry().rad = 0.2;
-        //     sphere->Pos = ChVector<>(elems[0], elems[1], elems[2]);
+        //     sphere->Pos = ChVector<>(0, 0, 0);
         //     // sphere->Pos = ChVector<>(0, 0, 0);
-        //     sphere->SetColor(ChColor(0, 0, .5f));
+        //     sphere->SetColor(ChColor(0, .5f, 0));
         //     newBody->AddAsset(sphere);
         // }
-        {
-            auto sphere = std::make_shared<ChSphereShape>();
-            sphere->GetSphereGeometry().rad = 0.15;
-            sphere->Pos = ChVector<>(0, 0, 0);
-            // sphere->Pos = ChVector<>(0, 0, 0);
-            sphere->SetColor(ChColor(0, .5f, 0));
-            newBody->AddAsset(sphere);
-        }
     };
     function_table["inertia_xx"] = [](xml_node<>* fieldNode, const ChSystem& my_system,
                                       std::shared_ptr<ChBodyAuxRef> newBody) {
@@ -275,6 +275,23 @@ void ChParserOpenSim::initFunctionTable() {
             R_F_M = Q_from_AngX(thetaX) * Q_from_AngY(thetaY) * Q_from_AngZ(thetaZ);
         } else if ((std::string(jointNode->name()) == std::string("CustomJoint"))) {
             // Cry
+            std::map<std::string, double> genCoords;
+            xml_node<>* coordinates =
+                jointNode->first_node("CoordinateSet")->first_node("objects")->first_node("Coordinate");
+            // Take in coordinate set
+            while (coordinates != nullptr) {
+                std::cout << *coordinates << std::endl;
+                std::cout << coordinates->first_attribute("name")->value() << ":"
+                          << coordinates->first_node("default_value")->value() << std::endl;
+                genCoords[std::string(coordinates->first_attribute("name")->value())] =
+                    std::stod(coordinates->first_node("default_value")->value());
+                coordinates = coordinates->next_sibling();
+            }
+            xml_node<>* transforms = jointNode->first_node("SpatialTransform")->first_node("TransformAxis");
+            while (transforms != nullptr) {
+                auto elems = ChParserOpenSim::strToDoubleVector(transforms->first_node("axis")->value();
+                transforms = transforms->next_sibling();
+            }
         }
 
         // Joint in parent to joint in child
@@ -291,22 +308,13 @@ void ChParserOpenSim::initFunctionTable() {
         // Joint in child to child
         ChFrame<> X_B_M(jointPosInChild, jointOrientationInChild);
 
+        // Multiply transforms through
         auto X_G_B = X_G_P * X_P_F * X_F_M * X_B_M.GetInverse();
+
         // Set body frame, not necessarily centroidal
         newBody->SetFrame_REF_to_abs(X_G_B);
-        // newBody->SetCoord(X_G_B.GetCoord());
 
-        // ChVector<> jointPosGlobal = parentPos + parentOrientation.GetInverse().Rotate(jointPosInParent);
-        // ChQuaternion<> jointOrientationGlobal = jointOrientationInParent * parentOrientation;
-        //
         ChFrame<> jointCoords = X_G_P * X_P_F;
-        //
-        // newBody->SetCoord(X_G_P * X_P_F * X_F_M * X_M_B);
-
-        // newBody->SetRot(parentOrientation * jointOrientationInParent * R_F_M *
-        //                 jointOrientationInChild.GetInverse());
-        //
-        // newBody->SetPos(jointPosGlobal - newBody->TransformPointLocalToParent(jointPosInChild));
 
         assert(std::abs(newBody->GetRot().Length() - 1) < 1e-10);
 
@@ -377,7 +385,6 @@ void ChParserOpenSim::initFunctionTable() {
         // jointPosGlobal.z()
         //           << "|" << jointOrientationGlobal.e0() << "," << jointOrientationGlobal.e1() << ","
         //           << jointOrientationGlobal.e2() << "," << jointOrientationGlobal.e3() << std::endl;
-
     };
     // function_table["PinJoint"] = [](xml_node<>* fieldNode, ChSystem& my_system, std::shared_ptr<ChBodyAuxRef>
     // newBody) {
@@ -410,23 +417,28 @@ void ChParserOpenSim::initVisualizations(xml_node<>* node, ChSystem& p_system) {
                 auto child = dynamic_cast<ChBodyAuxRef*>(link->GetBody2());
                 {
                     auto parent_joint_cyl = std::make_shared<ChCylinderShape>();
-                    parent_joint_cyl->GetCylinderGeometry().p1 = ChVector<>(0, 0, 0);
-                    parent_joint_cyl->GetCylinderGeometry().p2 =
-                        parent->GetFrame_REF_to_abs().TransformPointParentToLocal(linkCoords.pos);
-                    std::cout << "Length is " << parent_joint_cyl->GetCylinderGeometry().p2.Length() << std::endl;
+                    ChVector<> p1 = parent->GetFrame_COG_to_REF().GetPos();
+                    ChVector<> p2 = parent->GetFrame_REF_to_abs().TransformPointParentToLocal(linkCoords.pos);
+                    parent_joint_cyl->GetCylinderGeometry().p1 = p1;
+                    parent_joint_cyl->GetCylinderGeometry().p2 = p2;
+                    // std::cout << "Length is " << parent_joint_cyl->GetCylinderGeometry().p2.Length() << std::endl;
                     parent_joint_cyl->GetCylinderGeometry().rad = 0.1;
-                    if (parent_joint_cyl->GetCylinderGeometry().p2.Length() > 1e-5) {
+                    if ((p2 - p1).Length() > 1e-5) {
                         parent->AddAsset(parent_joint_cyl);
                     }
                 }
                 {
+                    double colorVal = (1.0 * child->GetIdentifier()) / p_system.Get_bodylist()->size();
+                    child->AddAsset(std::make_shared<ChColorAsset>(colorVal, 1 - colorVal, 0));
+
                     auto joint_child_cyl = std::make_shared<ChCylinderShape>();
-                    joint_child_cyl->GetCylinderGeometry().p1 =
-                        child->GetFrame_REF_to_abs().TransformPointParentToLocal(linkCoords.pos);
-                    joint_child_cyl->GetCylinderGeometry().p2 = ChVector<>(0, 0, 0);
-                    std::cout << "Length is " << joint_child_cyl->GetCylinderGeometry().p1.Length() << std::endl;
+                    ChVector<> p1 = child->GetFrame_REF_to_abs().TransformPointParentToLocal(linkCoords.pos);
+                    ChVector<> p2 = child->GetFrame_COG_to_REF().GetPos();
+                    joint_child_cyl->GetCylinderGeometry().p1 = p1;
+                    joint_child_cyl->GetCylinderGeometry().p2 = p2;
+                    // std::cout << "Length is " << joint_child_cyl->GetCylinderGeometry().p1.Length() << std::endl;
                     joint_child_cyl->GetCylinderGeometry().rad = 0.1;
-                    if (joint_child_cyl->GetCylinderGeometry().p1.Length() > 1e-5) {
+                    if ((p2 - p1).Length() > 1e-5) {
                         child->AddAsset(joint_child_cyl);
                     }
                 }
