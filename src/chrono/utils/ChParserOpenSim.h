@@ -60,8 +60,14 @@ class ChApi ChParserOpenSim {
     // Initializes visualization shapes for bodies connected to each link
     void initVisualizations(rapidxml::xml_node<>* node, ChSystem& p_system);
 
-    static std::vector<double> strToDoubleVector(const char* string);
-
+    // Get an STL vector from a string, used to make the xml parsing cleaner
+    template <typename T>
+    static inline std::vector<T> strToSTLVector(const char* string) {
+        std::istringstream buf(string);
+        std::istream_iterator<T> beg(buf), end;
+        return std::vector<T>(beg, end);
+    }
+    // Maps child fields of a body node to functions that handle said fields
     std::map<std::string, std::function<void(rapidxml::xml_node<>*, ChSystem&, std::shared_ptr<ChBodyAuxRef>)>>
         function_table;
     VisType m_visType;

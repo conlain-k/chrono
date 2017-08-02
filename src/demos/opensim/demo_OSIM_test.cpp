@@ -28,17 +28,19 @@ int main(int argc, char* argv[]) {
     // Make a system
     ChSystemSMC my_system;
 
+    // Create parser instance
     ChParserOpenSim parser;
 
     std::string filename;
-    filename = std::string("../../data/biomech/test.osim");
+    filename = std::string("../../data/opensim/Rajagopal2015-objs.osim");
+    // filename = std::string("../../data/opensim/dancing_dude.osim");
 
     if (argc == 2) {
         filename = std::string(argv[1]);
     }
-
-    // relative path, needs to change
-    parser.parse(my_system, filename.c_str());
+    // Use MESH for the Rajagopal file, PRIMITIVES for files that don't have the data in data/opensim
+    parser.parse(my_system, filename.c_str(), ChParserOpenSim::VisType::MESH);
+    // parser.parse(my_system, filename.c_str(), ChParserOpenSim::VisType::PRIMITIVES);
 
     // Setup Irrlicht
     ChIrrApp application(&my_system, L"ChBodyAuxRef demo", core::dimension2d<u32>(800, 600), false, true);
@@ -51,23 +53,10 @@ int main(int argc, char* argv[]) {
     application.AssetUpdateAll();
 
     // Simulation loop
-    application.SetTimestep(0.01);
-    // auto bodies = my_system.Get_bodylist();
-    // auto links = my_system.Get_linklist();
+    application.SetTimestep(0.001);
 
     while (application.GetDevice()->run()) {
         application.BeginScene();
-        // for (int i = 0; i < bodies->size(); ++i) {
-        //     auto b = bodies->at(i);
-        //     std::cout << b->GetName() << " is at " << b->GetPos().x() << "," << b->GetPos().y() << ","
-        //               << b->GetPos().z() << " mass is " << b->GetMass() << std::endl;
-        //     std::cout << b->GetRot().e0() << "," << b->GetRot().e1() << "," << b->GetRot().e2() << ","
-        //               << b->GetRot().e3() << std::endl;
-        // }
-        // for (int i = 0; i < links->size(); ++i) {
-        //     auto b = links->at(i);
-        //     std::cout << b->GetName() << std::endl;
-        // }
 
         application.DrawAll();
 
