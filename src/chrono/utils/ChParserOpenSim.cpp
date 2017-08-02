@@ -324,22 +324,6 @@ void ChParserOpenSim::initFunctionTable() {
                     double a, b;
                     // Drop spline's value into the transformValue
                     transformFunc.Evaluate(coordVals[coordNames.at(0)], transformValue, a, b);
-                    // if (newBody->GetNameString() == std::string("pelvis")) {
-                    //     std::cout << "gnuplot stuff" << std::endl;
-                    //     double size = .01;
-                    //
-                    //     ChVectorDynamic<> x(10000);
-                    //     ChVectorDynamic<> y(10000);
-                    //     for (int i = 0; i * size < vectX.at(vectX.size() - 1); i++) {
-                    //         *x[i] = i * size;
-                    //         double a, b;
-                    //         transformFunc.Evaluate(*x[i], *y[i], a, b);
-                    //     }
-                    //
-                    //     chrono::postprocess::ChGnuPlot mplot("opensim.gpl");
-                    //     mplot.SetGrid();
-                    //     mplot.Plot(x, y, transforms->first_attribute("name")->value(), "");
-                    // }
 
                 } else {
                     std::cout << "Unknown transform type: " << functionType
