@@ -21,6 +21,7 @@
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono_irrlicht/ChIrrApp.h"
 
+#include "stopwatch.hpp"
 #include "tritri.hpp"
 
 // Use the namespaces of Chrono
@@ -97,52 +98,53 @@ typedef struct {
 void printPoint(const Point& p) {
     printf("%f, %f, %f\n", p[0], p[1], p[2]);
 }
-void copyVectorToPointOffset(const ChVector<>& source, Point& dest, const ChVector<>& offset) {
-    dest[0] = source.x() + offset[0];
-    dest[1] = source.y() + offset[1];
-    dest[2] = source.z() + offset[2];
-    // printPoint(source);
-    // printPoint(dest);
+void copyVectorToPointOffset(const ChVector<>& source, Point& dest) {
+    dest[0] = source.x();
+    dest[1] = source.y();
+    dest[2] = source.z();
 }
 
-// Copy a point to another, possibly with an offset
-void copyPoint(const Point& source, Point& dest, const Point& offset) {
-    dest[0] = source[0] + offset[0];
-    dest[1] = source[1] + offset[1];
-    dest[2] = source[2] + offset[2];
-    printPoint(source);
-    printPoint(dest);
-}
+// // Copy a point to another, possibly with an offset
+// void copyPoint(const Point& source, Point& dest, const Point& offset) {
+//     dest[0] = source[0] + offset[0];
+//     dest[1] = source[1] + offset[1];
+//     dest[2] = source[2] + offset[2];
+//     printPoint(source);
+//     printPoint(dest);
+// }
 
-int mesh_t_compute_contacts(const mesh_t& mesh1, const mesh_t& mesh2, const ChVector<>& pos1, const ChVector<>& pos2) {
+int mesh_t_compute_contacts(const mesh_t& mesh1,
+                            const mesh_t& mesh2,
+                            const ChFrame<>& frame1,
+                            const ChFrame<>& frame2) {
     int ncontacts = 0;
-	printf("distance is %f\n", (pos1 - pos2).Length());
-    // For each face in the first mesh
-	
+
+    Point V1, V2, V3;
+    Point U1, U2, U3;
+    ChVector<int> i1, i2;
+#pragma omp parallel for reduction(+ : ncontacts) private(V1, V2, V3, U1, U2, U3, i1, i2) shared(mesh1, mesh2, frame1, frame2) schedule(dynamic)
     for (int f1 = 0; f1 < mesh1.indices.size(); f1++) {
         auto i1 = mesh1.indices[f1];
-        // printf("indices are %d, %d, %d\n", i.x(), i.y(), i.z());
-        Point V1, V2, V3;
-        // auto V1 = vertices[i.x()];
-        copyVectorToPointOffset(mesh1.vertices[i1.x()], V1, pos1);
-        copyVectorToPointOffset(mesh1.vertices[i1.y()], V2, pos1);
-        copyVectorToPointOffset(mesh1.vertices[i1.z()], V3, pos1);
-        for (int f2 = 0; f2 < mesh1.indices.size(); f2++) {
+
+        // Copy first vertex into V1
+        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.x()]), V1);
+        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.y()]), V2);
+        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.z()]), V3);
+        // printPoint(V1);
+        // #pragma omp parallel for reduction(+ : ncontacts) private(U1, U2, U3, i2)
+        for (int f2 = 0; f2 < mesh2.indices.size(); f2++) {
             auto i2 = mesh2.indices[f2];
-            // printf("indices are %d, %d, %d\n", i2.x(), i2.y(), i2.z());
-            Point U1, U2, U3;
-            // auto V1 = vertices[i.x()];
-            copyVectorToPointOffset(mesh2.vertices[i2.x()], U1, pos2);
-            copyVectorToPointOffset(mesh2.vertices[i2.y()], U2, pos2);
-            copyVectorToPointOffset(mesh2.vertices[i2.z()], U3, pos2);
-            if (tri_tri_intersect(U1, U2, U3, V1, V2, V3) == 1) {
-                ncontacts ++;
+            copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.x()]), U1);
+            copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.y()]), U2);
+            copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.z()]), U3);
+            // if (NoDivTriTriIsect(U1, U2, U3, V1, V2, V3) == 1) {
+            if (NoDivTriTriIsect(V1, V2, V3, U1, U2, U3) == 1) {
+                ncontacts++;
                 printf("collision occured between mesh1 at face %d, mesh2 at face %d \n", f1, f2);
             }
         }
     }
-	return ncontacts;
-    // printf("vertex %d is (%f, %f, %f)\n", );
+    return ncontacts;
 }
 
 int main(int argc, char* argv[]) {
@@ -153,8 +155,8 @@ int main(int argc, char* argv[]) {
     // system.SetSolverType(ChSolver::Type::SOR);
     // system.SetMaxItersSolverSpeed(20);
     // system.SetMaxItersSolverStab(5);
-    // collision::ChCollisionModel::SetDefaultSuggestedEnvelope(0.0025);
-    // collision::ChCollisionModel::SetDefaultSuggestedMargin(0.0025);
+    collision::ChCollisionModel::SetDefaultSuggestedEnvelope(0.001);
+    collision::ChCollisionModel::SetDefaultSuggestedMargin(0.001);
     system.Set_G_acc({0, 0, 0});
 
     // Create the Irrlicht application.
@@ -162,38 +164,23 @@ int main(int argc, char* argv[]) {
     ChIrrWizard::add_typical_Logo(application.GetDevice());
     ChIrrWizard::add_typical_Sky(application.GetDevice());
     ChIrrWizard::add_typical_Lights(application.GetDevice());
-    ChIrrWizard::add_typical_Camera(application.GetDevice(), irr::core::vector3df(10, 10, 0));
+    ChIrrWizard::add_typical_Camera(application.GetDevice(), irr::core::vector3df(0, 10, 10));
 
     ChTriangleMeshConnected bunnymesh;
-    bunnymesh.LoadWavefrontMesh("../../../759-final-project/data/bunny.obj", true, true);
+    bunnymesh.LoadWavefrontMesh(GetChronoDataFile("bunny.obj"), true, true);
     bunnymesh.Transform({0, 0, 0}, ChMatrix33<>(50.0));
 
-    auto vertices = bunnymesh.m_vertices;
-    auto normals = bunnymesh.m_normals;
-    auto indices = bunnymesh.m_face_v_indices;
+    ChTriangleMeshConnected bunnymesh2;
+    bunnymesh2.LoadWavefrontMesh(GetChronoDataFile("bunny.obj"), true, true);
+    bunnymesh2.Transform({0, 0, 0}, ChMatrix33<>(50.0));
 
     // In this example the two meshes are the same, the offsets are just different
-    mesh_t mesh1 = {vertices, normals, indices};
-    mesh_t mesh2 = {vertices, normals, indices};
-    mesh_t_compute_contacts(mesh1, mesh2, {0, 0, 0}, {20, 0, 0});
-
-    // std::vector<Point[3]> points1;
-    // points1.reserve(indices.size());
-
-    // // For each face
-    // for (int f = 0; f < indices.size(); f++) {
-    //     auto i = indices[f];
-    //     printf("indices are %d, %d, %d", i.x(), i.y(), i.z());
-    //     // For each vertex in the face
-    //     Point* tri1 = points1[f];
-    //     copyVectorToPointOffset(vertices[i.x()], tri1[0], {-10, 0, 0});
-    //     copyVectorToPointOffset(vertices[i.y()], tri1[1], {-10, 0, 0});
-    //     copyVectorToPointOffset(vertices[i.z()], tri1[2], {-10, 0, 0});
-    //     printPoint(points1[f][0]);
-    // }
+    mesh_t mesh1 = {bunnymesh.m_vertices, bunnymesh.m_normals, bunnymesh.m_face_v_indices};
+    mesh_t mesh2 = {bunnymesh2.m_vertices, bunnymesh2.m_normals, bunnymesh2.m_face_v_indices};
 
     auto bunny1 = std::make_shared<ChBody>();
     bunny1->SetPos(ChVector<>(-5, 0, 0));
+    bunny1->SetRot(QUNIT);
     bunny1->SetPos_dt(ChVector<>(2, 0, 0));
     bunny1->SetBodyFixed(false);
     system.AddBody(bunny1);
@@ -209,18 +196,19 @@ int main(int argc, char* argv[]) {
 
     auto bunny2 = std::make_shared<ChBody>();
     bunny2->SetPos(ChVector<>(5, 0, 0));
+    bunny2->SetRot(QUNIT);
     bunny2->SetPos_dt(ChVector<>(-2, 0, 0));
 
     bunny2->SetBodyFixed(false);
     system.AddBody(bunny2);
 
     bunny2->GetCollisionModel()->ClearModel();
-    bunny2->GetCollisionModel()->AddTriangleMesh(bunnymesh, false, false, VNULL, ChMatrix33<>(1), 0.005);
+    bunny2->GetCollisionModel()->AddTriangleMesh(bunnymesh2, false, false, VNULL, ChMatrix33<>(1), 0.005);
     bunny2->GetCollisionModel()->BuildModel();
     bunny2->SetCollide(true);
 
     auto bunnyasset2 = std::make_shared<ChTriangleMeshShape>();
-    bunnyasset2->SetMesh(bunnymesh);
+    bunnyasset2->SetMesh(bunnymesh2);
     bunny2->AddAsset(bunnyasset2);
 
     // Complete visualization asset construction.
@@ -232,7 +220,9 @@ int main(int argc, char* argv[]) {
 
     // Simulation loop.
     application.SetStepManage(true);
-    application.SetTimestep(0.02);
+    application.SetTimestep(0.01);
+
+    stopwatch<std::milli, double> sw;
 
     while (application.GetDevice()->run()) {
         application.BeginScene();
@@ -243,16 +233,28 @@ int main(int argc, char* argv[]) {
         // Advance dynamics.
         application.DoStep();
 
+        sw.start();
+        int ncontacts = mesh_t_compute_contacts(mesh1, mesh2, ChFrame<>(*bunny1), ChFrame<>(*bunny2));
+        sw.stop();
+
         // Process current collisions and report number of contacts on a few bodies.
         manager.Process();
-        int ncontacts = mesh_t_compute_contacts(mesh1, mesh2, bunny1->GetPos(), bunny2->GetPos());
-        if (manager.GetNcontacts(bunny1) != 0) {
+        if ((bunny2->GetPos() - bunny1->GetPos()).x() < 7.5) {
+            application.SetTimestep(0.001);
+        }
+
+        if (manager.GetNcontacts(bunny1) != 0 || ncontacts != 0) {
+            auto chrono_time = system.GetTimerCollisionNarrow() + system.GetTimerCollisionBroad();
+            std::cout << "chrono time is " << chrono_time << " s!" << std::endl;
+
+            std::cout << "mine took " << sw.count() / 1000 << " s!" << std::endl;
+            std::cout << "time ratio is " << sw.count() / (chrono_time * 1000) << std::endl;
             printf("ncontacts is %d\n", ncontacts);
             std::cout << "Time: " << system.GetChTime();
             std::cout << "   bunny1: " << manager.GetNcontacts(bunny1);
             std::cout << "   bunny2: " << manager.GetNcontacts(bunny2);
             std::cout << std::endl;
-            std::cout << "offset is " << (bunny1->GetPos() - bunny2->GetPos()).x() << std::endl;
+            std::cout << "offset is " << (bunny2->GetPos() - bunny1->GetPos()).x() << std::endl;
         }
         application.EndScene();
     }
