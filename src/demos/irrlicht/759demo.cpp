@@ -38,6 +38,9 @@ using namespace irr::core;
 using namespace irr::scene;
 using namespace irr::video;
 
+// Bin along X for now
+#define NBINS 10
+#define BIN_EPSILON 1e-5
 bool useBroadphase = true;
 
 // Callback class for contact processing.
@@ -93,18 +96,30 @@ class ContactManager : public ChContactContainer::ReportContactCallback {
 // A single point in 3D space
 typedef double Point[3];
 
-typedef struct {
+struct bbox {
+    // Store AABB mins (xmin,ymin,zmin)
+    Point min;
+
+    // Store AABB maxes (xmax,ymax,zmax)
+    Point max;
+};
+
+struct mesh_t {
+    // Get obj data from Chrono
     const std::vector<ChVector<double>> vertices;
     const std::vector<ChVector<double>> normals;
     const std::vector<ChVector<int>> indices;
+    // Host body
     ChBody& mFrame;
-    // Store AABB mins (xmin,ymin,zmin)
-    double AABBmin[3];
-    // Store AABB maxes (xmax,ymax,zmax)
-    double AABBmax[3];
+    // Holds bounding info
+    bbox AABB;
+    // Hold bin dimensions
+    bbox bins[NBINS];
+    // Hold indices of faces inside each bin
+    std::vector<ChVector<int>> binIndices[NBINS];
+    // List of copied points
     Point* mPoints;
-
-} mesh_t;
+};
 
 void printPoint(const Point& p) {
     printf("%f, %f, %f\n", p[0], p[1], p[2]);
@@ -136,6 +151,47 @@ void copyVerticesToPoints(mesh_t& mesh) {
     }
 }
 
+bool Point_inside_AABB(const bbox& box, const Point& point) {
+    // function isPointInsideAABB(point, box) {
+    return (point[0] >= box.min[0] && point[0] <= box.max[0]) && (point[1] >= box.min[1] && point[1] <= box.max[1]) &&
+           (point[2] >= box.min[2] && point[2] <= box.max[2]);
+}
+
+// Test if 2 AABBs collide
+bool AABB_overlap(const bbox& b1, const bbox& b2) {
+    // bool x = b1.min[0] <= b2.max[0] && b1.max[0] >= b2.min[0];
+    // bool y = b1.min[1] <= b2.max[1] && b1.max[1] >= b2.min[1];
+    // bool z = b1.min[2] <= b2.max[2] && b1.max[2] >= b2.min[2];
+    // printf("x,y,z is %d,%d,%d\n", x, y, z);
+    return (b1.min[0] <= b2.max[0] && b1.max[0] >= b2.min[0]) && (b1.min[1] <= b2.max[1] && b1.max[1] >= b2.min[1]) &&
+           (b1.min[2] <= b2.max[2] && b1.max[2] >= b2.min[2]);
+}
+
+void mesh_t_bin_vertices(mesh_t& mesh) {
+    // Pull into local scope for cache-friendly
+    const int size = mesh.indices.size();
+    auto points = mesh.mPoints;
+
+    ChVector<int> i1;
+    // std::cout << "size is " << size << std::endl;
+    // #pragma omp parallel for private(i1)
+    for (int bin = 0; bin < NBINS; bin++) {
+        for (int f1 = 0; f1 < size; f1++) {
+            i1 = mesh.indices[f1];
+            // Point P1, P2, P3;
+            Point& P1 = points[i1.x()];
+            Point& P2 = points[i1.y()];
+            Point& P3 = points[i1.z()];
+            // if point is in bin, add its index
+            if (Point_inside_AABB(mesh.bins[bin], P1) || Point_inside_AABB(mesh.bins[bin], P2) ||
+                Point_inside_AABB(mesh.bins[bin], P3)) {
+                // std::cout << "face" << f1 << " is in bin " << bin << std::endl;
+                mesh.binIndices[bin].push_back(i1);
+            }
+        }
+    }
+}
+
 // Create AABB for a mesh
 void mesh_t_compute_AABB(mesh_t& mesh) {
     double xmin = DBL_MAX, xmax = -DBL_MAX, ymin = DBL_MAX, ymax = -DBL_MAX, zmin = DBL_MAX, zmax = -DBL_MAX;
@@ -148,7 +204,7 @@ void mesh_t_compute_AABB(mesh_t& mesh) {
 // std::cout << "size is " << size << std::endl;
 #pragma omp parallel for reduction(min : xmin, ymin, zmin), reduction(max : xmax, ymax, zmax) private(i1)
     for (int f1 = 0; f1 < size; f1++) {
-        auto i1 = mesh.indices[f1];
+        i1 = mesh.indices[f1];
         // Point P1, P2, P3;
         Point& P1 = points[i1.x()];
         Point& P2 = points[i1.y()];
@@ -160,29 +216,36 @@ void mesh_t_compute_AABB(mesh_t& mesh) {
         ymax = max(ymax, max(P1[1], max(P2[1], P3[1])));
         zmax = max(zmax, max(P1[2], max(P2[2], P3[2])));
     }
-    mesh.AABBmin[0] = xmin;
-    mesh.AABBmin[1] = ymin;
-    mesh.AABBmin[2] = zmin;
-    mesh.AABBmax[0] = xmax;
-    mesh.AABBmax[1] = ymax;
-    mesh.AABBmax[2] = zmax;
+    mesh.AABB.min[0] = xmin;
+    mesh.AABB.min[1] = ymin;
+    mesh.AABB.min[2] = zmin;
+    mesh.AABB.max[0] = xmax;
+    mesh.AABB.max[1] = ymax;
+    mesh.AABB.max[2] = zmax;
+
+    // Width of bin (maybe)
+    double xwidth = (xmax - xmin) / NBINS;
+    double ywidth = (ymax - ymin) / NBINS;
+    double zwidth = (zmax - zmin) / NBINS;
+    // Only bin along x for now
+    for (int i = 0; i < NBINS; i++) {
+        mesh.bins[i].min[0] = xmin + (xwidth * i) - BIN_EPSILON;
+        mesh.bins[i].min[1] = ymin - BIN_EPSILON;  //+ (ywidth * i) - BIN_EPSILON;
+        mesh.bins[i].min[2] = zmin - BIN_EPSILON;  // + (zwidth * i) - BIN_EPSILON;
+        mesh.bins[i].max[0] = mesh.bins[i].min[0] + xwidth + 2 * BIN_EPSILON;
+        mesh.bins[i].max[1] = ymax + BIN_EPSILON;  // mesh.bins[i].min[1]   + ywidth + 2 * BIN_EPSILON;
+        mesh.bins[i].max[2] = zmax + BIN_EPSILON;  // mesh.bins[i].min[2]  + zwidth + 2 * BIN_EPSILON;
+        // printf("min is %f, max is %f\n", mesh.bins[i].min[0], mesh.bins[i].max[0]);
+        // printf("min is %f, max is %f\n", mesh.bins[i].min[1], mesh.bins[i].max[1]);
+        // printf("min is %f, max is %f\n", mesh.bins[i].min[2], mesh.bins[i].max[2]);
+    }
 }
 
-// Test if 2 AABBs collide
-bool mesh_t_AABB_collide(const mesh_t& m1, const mesh_t& m2) {
-    // bool x = (m1.AABBmin[0] <= m2.AABBmax[0] && m1.AABBmax[0] >= m2.AABBmin[0]);
-    // bool y = (m1.AABBmin[1] <= m2.AABBmax[1] && m1.AABBmax[1] >= m2.AABBmin[1]);
-    // bool z = (m1.AABBmin[2] <= m2.AABBmax[2] && m1.AABBmax[2] >= m2.AABBmin[2]);
-    // printf("x,y,z is %d,%d,%d\n", x, y, z);
-    return (m1.AABBmin[0] <= m2.AABBmax[0] && m1.AABBmax[0] >= m2.AABBmin[0]) &&
-           (m1.AABBmin[1] <= m2.AABBmax[1] && m1.AABBmax[1] >= m2.AABBmin[1]) &&
-           (m1.AABBmin[2] <= m2.AABBmax[2] && m1.AABBmax[2] >= m2.AABBmin[2]);
-}
 bool mesh_t_broadphase(mesh_t& mesh1, mesh_t& mesh2) {
     mesh_t_compute_AABB(mesh1);
     mesh_t_compute_AABB(mesh2);
     bool broad = false;
-    if (broad = mesh_t_AABB_collide(mesh1, mesh2)) {
+    if (broad = AABB_overlap(mesh1.AABB, mesh2.AABB)) {
         std::cout << "broadphase is true" << std::endl;
     } else {
         // std::cout << "broadphase is false" << std::endl;
@@ -227,47 +290,52 @@ int mesh_t_compute_contacts_fast(mesh_t& mesh1, mesh_t& mesh2) {
     return ncontacts;
 }
 
-int mesh_t_compute_contacts_faster(const mesh_t& mesh1,
-                                   const mesh_t& mesh2,
-                                   const ChFrame<>& frame1,
-                                   const ChFrame<>& frame2) {
+int mesh_t_compute_contacts_faster(mesh_t& mesh1, mesh_t& mesh2) {
+    copyVerticesToPoints(mesh1);
+    copyVerticesToPoints(mesh2);
+    bool broad = mesh_t_broadphase(mesh1, mesh2);
+    if (useBroadphase && !broad) {
+        // std::cout << "exiting early\n";
+        return 0;
+    }
     int ncontacts = 0;
 
-    // Point V1, V2, V3;
-    // Point U1, U2, U3;
-    // This might have a race condition
-    // #pragma omp parallel for reduction(+ : ncontacts) private(V1, V2, V3, U1, U2, U3, i1, i2) shared(mesh1, mesh2,
-    // frame1, frame2) schedule(dynamic)d
+    mesh_t_bin_vertices(mesh1);
+    mesh_t_bin_vertices(mesh2);
+
     Point* m1Points = mesh1.mPoints;
     Point* m2Points = mesh2.mPoints;
-
-#pragma omp parallel for
-    for (int f2 = 0; f2 < mesh2.indices.size(); f2++) {
-        auto i2 = mesh2.indices[f2];
-        copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.x()]), m2Points[i2.x()]);
-        copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.y()]), m2Points[i2.y()]);
-        copyVectorToPointOffset(frame2 * (mesh2.vertices[i2.z()]), m2Points[i2.z()]);
-    }
+    // So much indirection has to hurt the cache
 
     ChVector<int> i1, i2;
-#pragma omp parallel for reduction(+ : ncontacts) private(i1, i2) shared(mesh1, mesh2) schedule(dynamic)
-    for (int f1 = 0; f1 < mesh1.indices.size(); f1++) {
-        auto i1 = mesh1.indices[f1];
-        // Another optimization -- use local points for outer loop since copy is only once
-        Point V1, V2, V3;
-        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.x()]), V1);
-        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.y()]), V2);
-        copyVectorToPointOffset(frame1 * (mesh1.vertices[i1.z()]), V3);
-        // #pragma omp parallel for reduction(+ : ncontacts) private(U1, U2, U3, i2)
-        for (int f2 = 0; f2 < mesh2.indices.size(); f2++) {
-            auto i2 = mesh2.indices[f2];
-            // if (NoDivTriTriIsect(U1, U2, U3, V1, V2, V3) == 1) {
-            if (NoDivTriTriIsect(m2Points[i2.x()], m2Points[i2.y()], m2Points[i2.z()], m1Points[i1.x()],
-                                 m1Points[i1.y()], m1Points[i1.z()]) == 1) {
-                ncontacts++;
-                printf("collision occured between mesh1 at face %d, mesh2 at face %d \n", f1, f2);
+// Go through bins, then try and only check triangles inside same bin
+#pragma omp parallel for reduction(+ : ncontacts) private(i1, i2) schedule(dynamic)
+    for (int b1 = 0; b1 < NBINS; b1++) {
+        for (int b2 = 0; b2 < NBINS; b2++) {
+            if (AABB_overlap(mesh1.bins[b1], mesh2.bins[b2])) {
+                printf("bin %d for mesh 1 and %d for mesh 2 overlap\n", b1, b2);
+                // Compute collision
+                const int s1 = mesh1.binIndices[b1].size();
+                const int s2 = mesh2.binIndices[b2].size();
+                for (int f1 = 0; f1 < s1; f1++) {
+                    for (int f2 = 0; f2 < s2; f2++) {
+                        i1 = mesh1.binIndices[b1][f1];
+                        i2 = mesh2.binIndices[b2][f2];
+                        // TODO fix matching collision numbers
+                        if (NoDivTriTriIsect(m2Points[i2.x()], m2Points[i2.y()], m2Points[i2.z()], m1Points[i1.x()],
+                                             m1Points[i1.y()], m1Points[i1.z()]) == 1) {
+                            ncontacts++;
+                            printf(" new collision occured between mesh1 at face %d, mesh2 at face %d \n", f1, f2);
+                        }
+                    }
+                }
             }
         }
+    }
+
+    if (!broad && ncontacts != 0) {
+        printf("broadphase failed\n");
+        exit(1);
     }
     return ncontacts;
 }
@@ -364,13 +432,13 @@ int main(int argc, char* argv[]) {
         sw.stop();
         double my_time = sw.count();
 
-        // sw.start();
-        // int ncontacts1 = mesh_t_compute_contacts_faster(mesh1, mesh2, ChFrame<>(*bunny1), ChFrame<>(*bunny2));
-        // sw.stop();
-        // double my_time1 = sw.count();
-        //
+        sw.start();
+        int ncontacts1 = mesh_t_compute_contacts_faster(mesh1, mesh2);
+        sw.stop();
+        double my_time1 = sw.count();
+
         // if (ncontacts != ncontacts1) {
-        //     std::cerr << "dammit" << std::endl;
+        //     std::cerr << "dammit" << ncontacts << ", " << ncontacts1 << std::endl;
         //     exit(1);
         // }
 
@@ -388,12 +456,13 @@ int main(int argc, char* argv[]) {
         auto chrono_time = narrow + broad;
 
         std::cout << "offset is " << (bunny2->GetPos() - bunny1->GetPos()).x() << std::endl;
-        std::cout << "time ratio is " << my_time / (chrono_time * 1000) << std::endl;
+		std::cout << "time ratio is " << my_time / (chrono_time * 1000) << std::endl;
+		std::cout << "better ratio is " << my_time1 / (chrono_time * 1000) << std::endl;
         if (manager.GetNcontacts(bunny1) != 0 || ncontacts != 0) {
             std::cout << "fast took " << my_time / 1000 << " s !" << std::endl;
             std::cout << "chrono time is " << chrono_time << " s !" << std::endl;
             std::cout << "narrow is " << narrow << " broad is " << broad << std::endl;
-            // std::cout << "new took " << my_time1 / 1000 << " s!" << std::endl;
+            std::cout << "new took " << my_time1 / 1000 << " s!" << std::endl;
             printf("ncontacts is %d\n", ncontacts);
             std::cout << "Time: " << system.GetChTime();
             std::cout << "   bunny1: " << manager.GetNcontacts(bunny1);
@@ -401,6 +470,10 @@ int main(int argc, char* argv[]) {
             std::cout << std::endl;
         }
         application.EndScene();
+        for (int i = 0; i < NBINS; i++) {
+            mesh1.binIndices[i].clear();
+            mesh2.binIndices[i].clear();
+        }
     }
     delete[] mesh1.mPoints;
     delete[] mesh2.mPoints;
