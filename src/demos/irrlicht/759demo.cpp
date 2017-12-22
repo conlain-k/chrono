@@ -19,8 +19,12 @@
 #include "chrono/physics/ChBodyEasy.h"
 #include "chrono/physics/ChParticlesClones.h"
 #include "chrono/physics/ChSystemNSC.h"
+#include "chrono/physics/ChSystemSMC.h"
 #include "chrono_irrlicht/ChIrrApp.h"
 
+#include <omp.h>
+#include <unordered_set>
+#include <vector>
 #include "stopwatch.hpp"
 #include "tritri.hpp"
 
@@ -39,14 +43,15 @@ using namespace irr::scene;
 using namespace irr::video;
 
 // Bin along X for now
-#define NBINS 10
-#define BIN_EPSILON 1e-5
-bool useBroadphase = true;
+#define NBINS 20
+#define BIN_EPSILON .001
+#define USE_BROADPHASE true
+#define USE_HISTORY true
 
 // Callback class for contact processing.
 class ContactManager : public ChContactContainer::ReportContactCallback {
   public:
-    ContactManager(ChSystem* system) : m_system(system) {}
+    ContactManager(ChSystem* my_system) : m_system(my_system) {}
 
     // Return the current total number of contacts experienced by the specified body.
     unsigned int GetNcontacts(std::shared_ptr<ChBody> body) const {
@@ -93,6 +98,12 @@ class ContactManager : public ChContactContainer::ReportContactCallback {
     std::unordered_map<ChBody*, unsigned int> m_bcontacts;
 };
 
+// crappy hash function for a pair so it can be used in a set
+// A pair already defines equality, so we don't need that
+struct hash_pair_functor {
+    inline std::size_t operator()(const std::pair<int, int>& p) const { return p.first * 37 + p.second; }
+};
+
 // A single point in 3D space
 typedef double Point[3];
 
@@ -111,12 +122,16 @@ struct mesh_t {
     const std::vector<ChVector<int>> indices;
     // Host body
     ChBody& mFrame;
+    // Start as null quaternion
+    ChQuaternion<> oldRot;
     // Holds bounding info
     bbox AABB;
     // Hold bin dimensions
     bbox bins[NBINS];
     // Hold indices of faces inside each bin
     std::vector<ChVector<int>> binIndices[NBINS];
+    // Reverse mapping of bin indices to faces
+    std::vector<int> reverseIndices[NBINS];
     // List of copied points
     Point* mPoints;
 };
@@ -168,6 +183,12 @@ bool AABB_overlap(const bbox& b1, const bbox& b2) {
 }
 
 void mesh_t_bin_vertices(mesh_t& mesh) {
+    // Clear the old ones
+    for (int i = 0; i < NBINS; i++) {
+        mesh.binIndices[i].clear();
+        mesh.reverseIndices[i].clear();
+    }
+
     // Pull into local scope for cache-friendly
     const int size = mesh.indices.size();
     auto points = mesh.mPoints;
@@ -187,6 +208,7 @@ void mesh_t_bin_vertices(mesh_t& mesh) {
                 Point_inside_AABB(mesh.bins[bin], P3)) {
                 // std::cout << "face" << f1 << " is in bin " << bin << std::endl;
                 mesh.binIndices[bin].push_back(i1);
+                mesh.reverseIndices[bin].push_back(f1);
             }
         }
     }
@@ -228,40 +250,33 @@ void mesh_t_compute_AABB(mesh_t& mesh) {
     double ywidth = (ymax - ymin) / NBINS;
     double zwidth = (zmax - zmin) / NBINS;
     // Only bin along x for now
+    // Add a small epsilon so we don't accidentally
     for (int i = 0; i < NBINS; i++) {
         mesh.bins[i].min[0] = xmin + (xwidth * i) - BIN_EPSILON;
-        mesh.bins[i].min[1] = ymin - BIN_EPSILON;  //+ (ywidth * i) - BIN_EPSILON;
-        mesh.bins[i].min[2] = zmin - BIN_EPSILON;  // + (zwidth * i) - BIN_EPSILON;
+        mesh.bins[i].min[1] = ymin - BIN_EPSILON;  // full y height
+        mesh.bins[i].min[2] = zmin - BIN_EPSILON;  // full z width
         mesh.bins[i].max[0] = mesh.bins[i].min[0] + xwidth + 2 * BIN_EPSILON;
-        mesh.bins[i].max[1] = ymax + BIN_EPSILON;  // mesh.bins[i].min[1]   + ywidth + 2 * BIN_EPSILON;
-        mesh.bins[i].max[2] = zmax + BIN_EPSILON;  // mesh.bins[i].min[2]  + zwidth + 2 * BIN_EPSILON;
-        // printf("min is %f, max is %f\n", mesh.bins[i].min[0], mesh.bins[i].max[0]);
-        // printf("min is %f, max is %f\n", mesh.bins[i].min[1], mesh.bins[i].max[1]);
-        // printf("min is %f, max is %f\n", mesh.bins[i].min[2], mesh.bins[i].max[2]);
+        mesh.bins[i].max[1] = ymax + BIN_EPSILON;  // full y height
+        mesh.bins[i].max[2] = zmax + BIN_EPSILON;  // full z width
     }
 }
 
 bool mesh_t_broadphase(mesh_t& mesh1, mesh_t& mesh2) {
     mesh_t_compute_AABB(mesh1);
     mesh_t_compute_AABB(mesh2);
-    bool broad = false;
-    if (broad = AABB_overlap(mesh1.AABB, mesh2.AABB)) {
-        std::cout << "broadphase is true" << std::endl;
-    } else {
-        // std::cout << "broadphase is false" << std::endl;
-    }
-    return broad;
+
+    return AABB_overlap(mesh1.AABB, mesh2.AABB);
 }
 
-int mesh_t_compute_contacts_fast(mesh_t& mesh1, mesh_t& mesh2) {
-    copyVerticesToPoints(mesh1);
-    copyVerticesToPoints(mesh2);
-    bool broad = mesh_t_broadphase(mesh1, mesh2);
-    if (useBroadphase && !broad) {
-        // std::cout << "exiting early\n";
-        return 0;
-    }
-    int ncontacts = 0;
+// Return a list of contacts as <mesh1_face, mesh2_face>
+// Uses multithreading but not binning
+std::vector<std::pair<int, int>> mesh_t_narrowphase(mesh_t& mesh1, mesh_t& mesh2) {
+    int nthreads = omp_get_max_threads();
+    // Hold contact pairs for each thread
+    auto* contact_pair_bins = new std::vector<std::pair<int, int>>[nthreads];
+
+    // Final vector to return
+    std::vector<std::pair<int, int>> contact_pairs_vector;
 
     Point* m1Points = mesh1.mPoints;
     Point* m2Points = mesh2.mPoints;
@@ -270,7 +285,7 @@ int mesh_t_compute_contacts_fast(mesh_t& mesh1, mesh_t& mesh2) {
     const int s2 = mesh2.indices.size();
     ChVector<int> i1, i2;
 
-#pragma omp parallel for reduction(+ : ncontacts) private(i1, i2) schedule(dynamic)
+#pragma omp parallel for private(i1, i2) schedule(dynamic)
     for (int f1 = 0; f1 < s1; f1++) {
         for (int f2 = 0; f2 < s2; f2++) {
             i1 = mesh1.indices[f1];
@@ -278,54 +293,56 @@ int mesh_t_compute_contacts_fast(mesh_t& mesh1, mesh_t& mesh2) {
             // if (NoDivTriTriIsect(U1, U2, U3, V1, V2, V3) == 1) {
             if (NoDivTriTriIsect(m2Points[i2.x()], m2Points[i2.y()], m2Points[i2.z()], m1Points[i1.x()],
                                  m1Points[i1.y()], m1Points[i1.z()]) == 1) {
-                ncontacts++;
-                printf("collision occured between mesh1 at face %d, mesh2 at face %d \n", f1, f2);
+                contact_pair_bins[omp_get_thread_num()].push_back(std::pair<int, int>(f1, f2));
             }
         }
     }
-    if (!broad && ncontacts != 0) {
-        printf("broadphase failed\n");
-        exit(1);
+    // This is slightly very gross
+    for (int b = 0; b < nthreads; b++) {
+        contact_pairs_vector.insert(contact_pairs_vector.end(), contact_pair_bins[b].begin(),
+                                    contact_pair_bins[b].end());
     }
-    return ncontacts;
+
+    // Free alloced mem since this can't be done statically
+    delete[] contact_pair_bins;
+    return contact_pairs_vector;
 }
 
-int mesh_t_compute_contacts_faster(mesh_t& mesh1, mesh_t& mesh2) {
-    copyVerticesToPoints(mesh1);
-    copyVerticesToPoints(mesh2);
-    bool broad = mesh_t_broadphase(mesh1, mesh2);
-    if (useBroadphase && !broad) {
-        // std::cout << "exiting early\n";
-        return 0;
-    }
-    int ncontacts = 0;
-
-    mesh_t_bin_vertices(mesh1);
-    mesh_t_bin_vertices(mesh2);
+// Return a list of contacts as <mesh1_face, mesh2_face>
+// Uses binning to speed up computation
+std::vector<std::pair<int, int>> mesh_t_narrowphase_binning(mesh_t& mesh1, mesh_t& mesh2) {
+    int nthreads = omp_get_max_threads();
+    // Hold contact pairs for each thread
+    auto* contact_pair_bins = new std::vector<std::pair<int, int>>[nthreads];
+    // Final vector to return
+    std::vector<std::pair<int, int>> contact_pairs_vector;
+    // Construct set (all elements unique) so that we only get unique collisions
+    std::unordered_set<std::pair<int, int>, hash_pair_functor> contact_pairs_set;
 
     Point* m1Points = mesh1.mPoints;
     Point* m2Points = mesh2.mPoints;
-    // So much indirection has to hurt the cache
 
+    // So much indirection has to hurt the cache
     ChVector<int> i1, i2;
-// Go through bins, then try and only check triangles inside same bin
-#pragma omp parallel for reduction(+ : ncontacts) private(i1, i2) schedule(dynamic)
+#pragma omp parallel for private(i1, i2) schedule(dynamic)
+    // Go through bins, then try and only check triangles inside same bin
     for (int b1 = 0; b1 < NBINS; b1++) {
         for (int b2 = 0; b2 < NBINS; b2++) {
+            // If the bins overlap, check collision
             if (AABB_overlap(mesh1.bins[b1], mesh2.bins[b2])) {
-                printf("bin %d for mesh 1 and %d for mesh 2 overlap\n", b1, b2);
                 // Compute collision
                 const int s1 = mesh1.binIndices[b1].size();
                 const int s2 = mesh2.binIndices[b2].size();
                 for (int f1 = 0; f1 < s1; f1++) {
+                    i1 = mesh1.binIndices[b1][f1];
                     for (int f2 = 0; f2 < s2; f2++) {
-                        i1 = mesh1.binIndices[b1][f1];
                         i2 = mesh2.binIndices[b2][f2];
-                        // TODO fix matching collision numbers
+                        // check for collision and add it to this thread's collisions
                         if (NoDivTriTriIsect(m2Points[i2.x()], m2Points[i2.y()], m2Points[i2.z()], m1Points[i1.x()],
                                              m1Points[i1.y()], m1Points[i1.z()]) == 1) {
-                            ncontacts++;
-                            printf(" new collision occured between mesh1 at face %d, mesh2 at face %d \n", f1, f2);
+                            // add to ++;
+                            contact_pair_bins[omp_get_thread_num()].push_back(
+                                std::pair<int, int>(mesh1.reverseIndices[b1][f1], mesh2.reverseIndices[b2][f2]));
                         }
                     }
                 }
@@ -333,27 +350,57 @@ int mesh_t_compute_contacts_faster(mesh_t& mesh1, mesh_t& mesh2) {
         }
     }
 
-    if (!broad && ncontacts != 0) {
-        printf("broadphase failed\n");
-        exit(1);
+    // Add contacts from each thread
+    for (int b = 0; b < nthreads; b++) {
+        contact_pairs_set.insert(contact_pair_bins[b].begin(), contact_pair_bins[b].end());
     }
-    return ncontacts;
+    // Store this even though it might not be needed any more
+    contact_pairs_vector = std::vector<std::pair<int, int>>(contact_pairs_set.begin(), contact_pairs_set.end());
+    // Store old rot for history
+    mesh1.oldRot = mesh1.mFrame.GetRot();
+    // Clean up memory
+    delete[] contact_pair_bins;
+
+    return contact_pairs_vector;
+}
+
+std::vector<std::pair<int, int>> mesh_t_compute_contacts(mesh_t& mesh1, mesh_t& mesh2, bool use_binning = true) {
+    copyVerticesToPoints(mesh1);
+    copyVerticesToPoints(mesh2);
+    bool broad = mesh_t_broadphase(mesh1, mesh2);
+    // Exit early if no broadphase detected
+    if (USE_BROADPHASE && !broad) {
+        // std::cout << "exiting early\n";
+        return std::vector<std::pair<int, int>>();
+    }
+    if (use_binning) {
+        // If we're using binning, don't rebin if we haven't rotated since bins are the same
+        if (USE_HISTORY && mesh1.mFrame.GetRot() == mesh1.oldRot) {
+            // std::cout << "no need to redo binning!\n";
+        } else {
+            mesh_t_bin_vertices(mesh1);
+            mesh_t_bin_vertices(mesh2);
+        }
+        return mesh_t_narrowphase_binning(mesh1, mesh2);
+    } else {
+        return mesh_t_narrowphase(mesh1, mesh2);
+    }
 }
 
 int main(int argc, char* argv[]) {
     GetLog() << "Copyright (c) 2017 projectchrono.org\nChrono version: " << CHRONO_VERSION << "\n\n";
 
-    // Create the system.
-    ChSystemNSC system;
-    // system.SetSolverType(ChSolver::Type::SOR);
-    // system.SetMaxItersSolverSpeed(20);
-    // system.SetMaxItersSolverStab(5);
+    // Create the my_system.
+    ChSystemNSC my_system;
+    // my_system.SetSolverType(ChSolver::Type::SOR);
+    // my_system.SetMaxItersSolverSpeed(20);
+    // my_system.SetMaxItersSolverStab(5);
     collision::ChCollisionModel::SetDefaultSuggestedEnvelope(0.001);
     collision::ChCollisionModel::SetDefaultSuggestedMargin(0.001);
-    system.Set_G_acc({0, 0, 0});
+    my_system.Set_G_acc({0, 0, 0});
 
     // Create the Irrlicht application.
-    ChIrrApp application(&system, L"Number of collisions", irr::core::dimension2d<irr::u32>(800, 600), false);
+    ChIrrApp application(&my_system, L"Number of collisions", irr::core::dimension2d<irr::u32>(800, 600), false);
     ChIrrWizard::add_typical_Logo(application.GetDevice());
     ChIrrWizard::add_typical_Sky(application.GetDevice());
     ChIrrWizard::add_typical_Lights(application.GetDevice());
@@ -361,21 +408,22 @@ int main(int argc, char* argv[]) {
 
     ChTriangleMeshConnected bunnymesh;
     bunnymesh.LoadWavefrontMesh(GetChronoDataFile("bunny.obj"), true, true);
-    bunnymesh.Transform({0, 0, 0}, ChMatrix33<>(50.0));
+    // Shift down and scale by 40 so that bunnies are reasonable size and COM is decent
+    bunnymesh.Transform({0, -3, 0}, ChMatrix33<>(50.0));
 
     ChTriangleMeshConnected bunnymesh2;
     bunnymesh2.LoadWavefrontMesh(GetChronoDataFile("bunny.obj"), true, true);
-    bunnymesh2.Transform({0, 0, 0}, ChMatrix33<>(50.0));
+    bunnymesh2.Transform({0, -3, 0}, ChMatrix33<>(50.0));
 
     auto bunny1 = std::make_shared<ChBody>();
     bunny1->SetPos(ChVector<>(-5, 0, 0));
-    bunny1->SetRot(QUNIT);
+    bunny1->SetRot(Q_from_AngY(CH_C_PI / 6));
     bunny1->SetPos_dt(ChVector<>(2, 0, 0));
     bunny1->SetBodyFixed(false);
-    system.AddBody(bunny1);
+    my_system.AddBody(bunny1);
 
     bunny1->GetCollisionModel()->ClearModel();
-    bunny1->GetCollisionModel()->AddTriangleMesh(bunnymesh, false, false, VNULL, ChMatrix33<>(1), 0.005);
+    bunny1->GetCollisionModel()->AddTriangleMesh(bunnymesh, false, false, VNULL, ChMatrix33<>(1), 0.001);
     bunny1->GetCollisionModel()->BuildModel();
     bunny1->SetCollide(true);
 
@@ -386,14 +434,14 @@ int main(int argc, char* argv[]) {
     auto bunny2 = std::make_shared<ChBody>();
     bunny2->SetPos(ChVector<>(5, 0, 0));
     // Rotate at strange angle to remove symmetry
-    bunny2->SetRot(Q_from_AngY(-.1));
+    bunny2->SetRot(Q_from_AngY(2 * CH_C_PI / 3));
     bunny2->SetPos_dt(ChVector<>(-2, 0, 0));
 
     bunny2->SetBodyFixed(false);
-    system.AddBody(bunny2);
+    my_system.AddBody(bunny2);
 
     bunny2->GetCollisionModel()->ClearModel();
-    bunny2->GetCollisionModel()->AddTriangleMesh(bunnymesh2, false, false, VNULL, ChMatrix33<>(1), 0.005);
+    bunny2->GetCollisionModel()->AddTriangleMesh(bunnymesh2, false, false, VNULL, ChMatrix33<>(1), 0.001);
     bunny2->GetCollisionModel()->BuildModel();
     bunny2->SetCollide(true);
 
@@ -403,18 +451,18 @@ int main(int argc, char* argv[]) {
 
     // In this example the two meshes are the same, the offsets are just different
     mesh_t mesh1 = {bunnymesh.m_vertices, bunnymesh.m_normals, bunnymesh.m_face_v_indices, *bunny1};
-    mesh1.mPoints = (Point*)malloc(mesh1.vertices.size() * sizeof(Point));
+    mesh1.mPoints = new Point[mesh1.vertices.size()];
     mesh_t mesh2 = {bunnymesh2.m_vertices, bunnymesh2.m_normals, bunnymesh2.m_face_v_indices, *bunny2};
-    mesh2.mPoints = (Point*)malloc(mesh2.vertices.size() * sizeof(Point));
+    mesh2.mPoints = new Point[mesh2.vertices.size()];
 
     // Complete visualization asset construction.
     application.AssetBindAll();
     application.AssetUpdateAll();
 
     // Create the contact manager.
-    ContactManager manager(&system);
+    ContactManager manager(&my_system);
 
-    double timestep = .01;
+    double timestep = .005;
     // Simulation loop.
     application.SetStepManage(true);
     application.SetTimestep(timestep);
@@ -422,58 +470,54 @@ int main(int argc, char* argv[]) {
     stopwatch<std::milli, double> sw;
 
     while (application.GetDevice()->run()) {
+        // Check with no binning
+        sw.start();
+        auto my_contacts = mesh_t_compute_contacts(mesh1, mesh2, false);
+        int ncontacts = my_contacts.size();
+        sw.stop();
+        double my_time = sw.count();
+
+        // Check with binning
+        sw.start();
+        auto fast_contacts = mesh_t_compute_contacts(mesh1, mesh2, true);
+        int ncontacts_binning = fast_contacts.size();
+        sw.stop();
+        double my_time1 = sw.count();
+
+        // this checks for binning bugs, should never print
+        if (ncontacts != ncontacts_binning) {
+            std::cerr << "different numbers: " << ncontacts << ", " << ncontacts_binning << std::endl;
+            // exit(1);
+        }
         application.BeginScene();
 
         // Render scene.
         application.DrawAll();
-
-        sw.start();
-        int ncontacts = mesh_t_compute_contacts_fast(mesh1, mesh2);
-        sw.stop();
-        double my_time = sw.count();
-
-        sw.start();
-        int ncontacts1 = mesh_t_compute_contacts_faster(mesh1, mesh2);
-        sw.stop();
-        double my_time1 = sw.count();
-
-        // if (ncontacts != ncontacts1) {
-        //     std::cerr << "dammit" << ncontacts << ", " << ncontacts1 << std::endl;
-        //     exit(1);
-        // }
 
         // Advance dynamics.
         application.DoStep();
 
         // Process current collisions and report number of contacts on a few bodies.
         manager.Process();
-        if (timestep == .05 && (bunny2->GetPos() - bunny1->GetPos()).x() < 7.2) {
-            timestep = .005;
-            application.SetTimestep(timestep);
-        }
-        auto narrow = system.GetTimerCollisionNarrow();
-        auto broad = system.GetTimerCollisionBroad();
-        auto chrono_time = narrow + broad;
 
-        std::cout << "offset is " << (bunny2->GetPos() - bunny1->GetPos()).x() << std::endl;
-		std::cout << "time ratio is " << my_time / (chrono_time * 1000) << std::endl;
-		std::cout << "better ratio is " << my_time1 / (chrono_time * 1000) << std::endl;
+        auto narrow = my_system.GetTimerCollisionNarrow();
+        auto broad = my_system.GetTimerCollisionBroad();
+        auto chrono_time = narrow + broad;
+        std::cout << "TIMESTEP ---------------------------------------------------- \n";
+        std::cout << "Time: " << my_system.GetChTime() << std::endl;
+        std::cout << "ratio without broadphase: " << my_time / (chrono_time * 1000) << std::endl;
+        std::cout << "ratio with broadphase: " << my_time1 / (chrono_time * 1000) << std::endl;
         if (manager.GetNcontacts(bunny1) != 0 || ncontacts != 0) {
-            std::cout << "fast took " << my_time / 1000 << " s !" << std::endl;
             std::cout << "chrono time is " << chrono_time << " s !" << std::endl;
-            std::cout << "narrow is " << narrow << " broad is " << broad << std::endl;
-            std::cout << "new took " << my_time1 / 1000 << " s!" << std::endl;
+            std::cout << "chrono narrow is " << narrow << " broad is " << broad << std::endl;
+            std::cout << "without binning, took " << my_time / 1000 << " s !" << std::endl;
+            std::cout << "with binning took " << my_time1 / 1000 << " s!" << std::endl;
             printf("ncontacts is %d\n", ncontacts);
-            std::cout << "Time: " << system.GetChTime();
             std::cout << "   bunny1: " << manager.GetNcontacts(bunny1);
             std::cout << "   bunny2: " << manager.GetNcontacts(bunny2);
             std::cout << std::endl;
         }
         application.EndScene();
-        for (int i = 0; i < NBINS; i++) {
-            mesh1.binIndices[i].clear();
-            mesh2.binIndices[i].clear();
-        }
     }
     delete[] mesh1.mPoints;
     delete[] mesh2.mPoints;
